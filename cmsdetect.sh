@@ -258,18 +258,29 @@ spinner "$MATCH_PID" "Step 2/3: Matching against signature database (172 CMS)"
 wait "$MATCH_PID"
 
 # ── version detection ─────────────────────────────────────────────────────────
-# For each matched CMS (highest-confidence first), try to find a version number:
-#   1. On the already-fetched main page body, near the CMS name / matched terms
-#   2. If not found, fetch CMS-specific version_paths (or generic fallback paths)
-#      and repeat the same proximity search on each fetched page
-# Stops at the first version found for each CMS - we don't need every possible
-# source, just one reliable one.
+# For each matched CMS (highest-confidence first), try to find version numbers:
+#   Stage 1 (precise): version-style numbers attached to a "?ver=/?v=/?version="
+#            query parameter on an asset path containing a software/asset trigger
+#            word (css, js, app, assets, theme, plugin, ...). Works independently
+#            of whether the CMS name itself appears anywhere near it - some CMS
+#            are only identified by structure, not by name in the source.
+#   Stage 2 (fallback): only runs if Stage 1 found nothing at all. Broader sweep
+#            for any version-shaped number anywhere in the body, no trigger
+#            words required - much noisier, used only as a last resort.
+# If nothing is found on the main page, the same two-stage search is repeated
+# against known version-disclosure paths (CMS-specific where researched, generic
+# README/CHANGELOG/composer.json fallback otherwise).
+# Distinct version values found are ranked by frequency; the top 3 are kept.
+# If the top 3 collapse to a single distinct value -> confident (green).
+# If 2+ different values remain in the top 3 -> ambiguous (yellow), all shown
+# with their source line so the user can judge for themselves.
 
 VERSION_PID_LOG="$TMPDIR/version.log"
 FINAL_RESULTS_JSON="$TMPDIR/final_results.json"
 
 ( python3 - "$BODY_FILE" "$RESULTS_JSON" "$TMPDIR/generic_paths.json" "$BASE_URL_FILE" "$FINAL_RESULTS_JSON" << 'PYEOF'
 import json, re, sys, subprocess
+from collections import Counter
 
 body_file, results_file, generic_paths_file, base_url_file, out_file = sys.argv[1:6]
 
@@ -287,54 +298,67 @@ with open(generic_paths_file) as f:
     generic_paths = json.load(f)
 base_url = read(base_url_file).strip()
 
-VERSION_NUM_RE = r'(\d{1,3}\.\d{1,3}(?:\.\d{1,4})?(?:\.\d{1,4})?)'
-VERSION_NUM_OR_MAJOR_RE = r'(\d{1,3}\.\d{1,3}(?:\.\d{1,4})?(?:\.\d{1,4})?|\d{1,3})'
-ANCHOR_KEYWORDS = r'(?:version|ver|v|release|rel)'
+TRIGGER_WORDS = [
+    "css", "js", "app", "assets", "asset", "theme", "themes", "style", "styles",
+    "bundle", "main", "core", "system", "plugin", "plugins", "module", "modules",
+    "static", "dist", "build", "script", "scripts", "vendor", "lib", "libs",
+    "template", "templates"
+]
+TRIGGER_RE_STR = "(?:" + "|".join(TRIGGER_WORDS) + ")"
+VERSION_VALUE_RE = r'\d{1,4}(?:\.\d{1,4}){1,3}'
 
-def find_version_near(text, cms_name, search_terms, window=80):
+STAGE1_RE = re.compile(
+    r'(?P<path>[A-Za-z0-9_\-./]*' + TRIGGER_RE_STR + r'[A-Za-z0-9_\-./]*)'
+    r'\?(?:ver|v|version)=(?P<version>' + VERSION_VALUE_RE + r')',
+    re.IGNORECASE
+)
+STAGE2_RE = re.compile(r'\b(' + VERSION_VALUE_RE + r')\b')
+
+def get_line_for_offset(text, offset, max_len=150):
+    line_start = text.rfind('\n', 0, offset) + 1
+    line_end = text.find('\n', offset)
+    if line_end == -1:
+        line_end = len(text)
+    line = text[line_start:line_end].strip()
+    if len(line) <= max_len:
+        return line
+    rel_offset = offset - line_start
+    half = max_len // 2
+    start = max(0, rel_offset - half)
+    end = min(len(line), start + max_len)
+    start = max(0, end - max_len)
+    snippet = line[start:end]
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(line) else ""
+    return f"{prefix}{snippet}{suffix}"
+
+def detect_versions(text):
+    """Returns {"stage": 0/1/2, "top": [{"version","count","line"}...], "ambiguous": bool}"""
     if not text:
-        return None
-    candidates = set()
-    if cms_name:
-        candidates.add(cms_name)
-    for term in (search_terms or []):
-        if term and len(term) < 40:
-            candidates.add(term)
+        return {"stage": 0, "top": [], "ambiguous": False}
 
-    text_lower = text.lower()
-    found = []
+    hits = [(m.group("version"), m.start()) for m in STAGE1_RE.finditer(text)]
+    stage = 1
+    if not hits:
+        hits = [(m.group(1), m.start()) for m in STAGE2_RE.finditer(text)]
+        stage = 2
+    if not hits:
+        return {"stage": 0, "top": [], "ambiguous": False}
 
-    for term in candidates:
-        term_lower = term.lower()
-        start = 0
-        while True:
-            idx = text_lower.find(term_lower, start)
-            if idx == -1:
-                break
-            lo = max(0, idx - window)
-            hi = min(len(text), idx + len(term) + window)
-            snippet = text[lo:hi]
+    counts = Counter(v for v, _ in hits)
+    first_offset = {}
+    for v, off in hits:
+        if v not in first_offset:
+            first_offset[v] = off
 
-            direct = re.search(
-                re.escape(term) + r'[!\s/_=:-]{0,3}' + VERSION_NUM_OR_MAJOR_RE,
-                snippet, re.IGNORECASE
-            )
-            if direct:
-                found.append(direct.group(1))
-
-            for kw_match in re.finditer(ANCHOR_KEYWORDS, snippet, re.IGNORECASE):
-                kw_end = kw_match.end()
-                tail = snippet[kw_end:kw_end+15]
-                ver_match = re.match(r'[\s:=/_-]{0,3}' + VERSION_NUM_RE, tail)
-                if ver_match:
-                    found.append(ver_match.group(1))
-
-            start = idx + len(term)
-
-    if not found:
-        return None
-    found.sort(key=lambda v: -v.count('.'))
-    return found[0]
+    distinct_sorted = sorted(counts.keys(), key=lambda v: (-counts[v], first_offset[v]))
+    top_values = distinct_sorted[:3]
+    top = [
+        {"version": v, "count": counts[v], "line": get_line_for_offset(text, first_offset[v])}
+        for v in top_values
+    ]
+    ambiguous = len(top_values) > 1
+    return {"stage": stage, "top": top, "ambiguous": ambiguous}
 
 def fetch_path(base_url, path):
     """Best-effort curl fetch, returns body text or empty string. Short timeout,
@@ -353,27 +377,32 @@ MAX_CMS_TO_VERSION_CHECK = 3  # only deep-check the top N matches, to keep runti
 MAX_PATHS_TO_TRY = 6          # cap path probing per CMS
 
 for r in results[:MAX_CMS_TO_VERSION_CHECK]:
-    version = find_version_near(body, r["name"], r.get("matched_terms", []))
+    detection = detect_versions(body)
     checked_paths = []
+    source = "main page"
 
-    if not version:
+    if detection["stage"] == 0:
         paths_to_try = r.get("version_paths") or generic_paths
         for path in paths_to_try[:MAX_PATHS_TO_TRY]:
             page_text = fetch_path(base_url, path)
             checked_paths.append(path)
             if page_text:
-                version = find_version_near(page_text, r["name"], r.get("matched_terms", []))
-                if version:
-                    r["version_source"] = path
+                detection = detect_versions(page_text)
+                if detection["stage"] != 0:
+                    source = path
                     break
 
-    r["version"] = version
+    r["version_detection"] = detection
+    r["version_source"] = source if detection["stage"] != 0 else None
     r["version_paths_checked"] = checked_paths
+    r["version_was_checked"] = True
 
-# CMS beyond MAX_CMS_TO_VERSION_CHECK just get version = None (not checked, to save time)
+# CMS beyond MAX_CMS_TO_VERSION_CHECK just get an empty detection (not checked, to save time)
 for r in results[MAX_CMS_TO_VERSION_CHECK:]:
-    r["version"] = None
+    r["version_detection"] = {"stage": 0, "top": [], "ambiguous": False}
+    r["version_source"] = None
     r["version_paths_checked"] = []
+    r["version_was_checked"] = False
 
 with open(out_file, "w") as f:
     json.dump(results, f)
@@ -432,13 +461,28 @@ for r in results:
     if r.get("path_hint"):
         print(f"    {CYAN}hint paths:{NC} {r['path_hint']}")
 
-    # version line - green if found, yellow notice if not
-    if r.get("version"):
-        source = r.get("version_source", "main page")
-        print(f"  Version: {BOLD}{GREEN}{r['version']}{NC}  {CYAN}(source: {source}){NC}")
-    elif "version" in r:
-        # only show "not found" for CMS we actually attempted (top matches)
-        print(f"  Version: {YELLOW}No version number found.{NC}")
+    # version output:
+    #   - no hits at all -> red "not found"
+    #   - hits collapse to a single distinct version value (regardless of how many
+    #     times it was found) -> green, confident single result
+    #   - 2+ different distinct values in the top 3 -> yellow, list all with source line
+    vd = r.get("version_detection", {"stage": 0, "top": [], "ambiguous": False})
+    top = vd.get("top", [])
+
+    if not r.get("version_was_checked"):
+        print(f"  Version: {CYAN}Not checked (outside top 3 matches).{NC}")
+    elif not top:
+        print(f"  Version: {RED}No version number found.{NC}")
+    elif not vd.get("ambiguous"):
+        only = top[0]
+        stage_note = " (broad match, no asset trigger word nearby)" if vd["stage"] == 2 else ""
+        print(f"  Version: {BOLD}{GREEN}{only['version']}{NC}  {CYAN}(found {only['count']}x, source: {r.get('version_source')}){NC}{stage_note}")
+    else:
+        stage_note = " - broad fallback match, treat with extra caution" if vd["stage"] == 2 else ""
+        print(f"  Version: {YELLOW}Multiple candidate versions found{stage_note}:{NC}")
+        for t in top:
+            print(f"    {YELLOW}Version: {t['version']}{NC}  {CYAN}(x{t['count']}){NC}")
+            print(f"      {t['line']}")
     print()
 PYEOF
 
