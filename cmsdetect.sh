@@ -427,18 +427,35 @@ def looks_like_ip(value):
         return False
 
 # Keywords that, when found IMMEDIATELY before a matched number (small fixed
-# window, not the whole line), make it almost certainly a CSS/styling value
-# rather than a version string. Deliberately conservative and CSS-property-
-# specific - generic enough to catch real noise, narrow enough to never sit
-# right before a genuine "ProductName 1.2.3" or "?ver=1.2.3" style match.
+# window, not the whole line), make it almost certainly NOT a CMS version -
+# either a CSS/styling value or a fixed, universal web-standard version string
+# that has nothing to do with the CMS itself (viewport scaling, RSS/Atom/
+# sitemap protocol versions, XML declaration version). Deliberately
+# conservative: narrow enough to never sit right before a genuine
+# "ProductName 1.2.3" or "?ver=1.2.3" style match - verified against real
+# false positives (Gila CMS: IP + opacity; Joomla: viewport + RSS) plus
+# multiple safety tests confirming real versions are never caught.
 STAGE2_NEGATIVE_KEYWORDS = [
+    # CSS styling values
     "opacity:", "opacity :",
     "z-index:", "z-index :",
     "rgba(", "rgb(",
     "scale(", "scalex(", "scaley(", "scalez(",
     "line-height:", "line-height :",
+    # HTML viewport meta-tag attributes (universal on virtually every modern page)
+    "initial-scale=", "maximum-scale=", "minimum-scale=",
+    # RSS/Atom feed version strings (fixed web-standard values, not CMS versions)
+    'title="rss ', "title='rss ",
+    '<rss version="', "<rss version='",
+    'xmlns="http://www.w3.org/2005/atom',
+    # Sitemap protocol version (sitemaps.org - always 0.9)
+    "sitemap/0.9", "sitemaps.org/schemas/sitemap/",
+    # XML declaration version (always 1.0 on virtually every XML/RSS/SVG file)
+    '<?xml version="', "<?xml version='",
+    # Legacy DOCTYPE spec versions (rare on modern sites, but 100% reliable when present)
+    "dtd html 4.01", "dtd xhtml 1.0", "dtd xhtml 1.1",
 ]
-STAGE2_NEGATIVE_WINDOW = 20  # chars immediately before the match - intentionally tight
+STAGE2_NEGATIVE_WINDOW = 25  # chars immediately before the match - intentionally tight
 
 def has_negative_context(text, offset):
     lo = max(0, offset - STAGE2_NEGATIVE_WINDOW)
