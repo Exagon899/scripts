@@ -509,13 +509,31 @@ def detect_versions(text):
         return {"stage": 0, "top": [], "ambiguous": False}
 
     # Stage 1 normally trusts any ?ver=/asset-trigger-word match as CMS-specific,
-    # but well-known bundled third-party libraries (jQuery being the single most
-    # common case - shipped by virtually every CMS, with the exact same ?ver=
-    # query-string convention) produce false positives that look identical in
-    # shape to a real CMS version. Excluded here by asset filename, not by the
-    # broader Stage 2 negative-keyword list, since Stage 1's trigger-word
-    # precision should otherwise remain untouched.
-    KNOWN_LIBRARY_PATHS = ["jquery.min.js", "jquery-migrate.min.js", "jquery.js"]
+    # but well-known bundled third-party libraries (jQuery being the most common
+    # case, but WordPress themes in particular routinely bundle a dozen more -
+    # Bootstrap, Font Awesome, Animate.css, Owl Carousel, Slick, Swiper, etc.)
+    # produce false positives that look identical in shape to a real CMS version.
+    # Excluded here by asset filename, not by the broader Stage 2 negative-keyword
+    # list, since Stage 1's trigger-word precision should otherwise remain
+    # untouched. Each entry is a specific enough filename/folder fragment that a
+    # CMS's own core asset is extremely unlikely to collide with it (deliberately
+    # avoided generic names like "all.min.css" that a CMS could plausibly use for
+    # its own bundle - see comment in research notes).
+    KNOWN_LIBRARY_PATHS = [
+        "jquery.min.js", "jquery-migrate.min.js", "jquery.js",
+        "bootstrap.min.css", "bootstrap.min.js", "bootstrap.bundle.min.js",
+        "font-awesome", "fontawesome",
+        "animate.min.css",
+        "owl.carousel", "owl.theme",
+        "slick.min.js", "slick.min.css", "slick-carousel",
+        "swiper.min.js", "swiper.min.css", "swiper-bundle",
+        "modernizr.min.js",
+        "select2.min.js", "select2.min.css",
+        "lightbox.min.js", "lightbox.min.css",
+        "hoverintent", "waypoints.min.js",
+        "isotope.pkgd.min.js", "isotope.min.js",
+        "touchswipe",
+    ]
     raw_hits = [(m.group("version"), m.start(), m.group("path")) for m in STAGE1_RE.finditer(text)]
     hits = [
         (v, off) for v, off, path in raw_hits
