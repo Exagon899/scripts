@@ -406,6 +406,45 @@ STAGE1_RE = re.compile(
 )
 STAGE2_RE = re.compile(r'\b(' + VERSION_VALUE_RE + r')\b')
 
+# Stage 2 is a broad "any version-shaped number" sweep, used only when the
+# precise Stage 1 (?ver=/?v= with an asset trigger word) finds nothing. Being
+# broad, it's prone to false positives - mainly IP addresses and CSS numeric
+# values that happen to look like a dotted version string. These two filters
+# only ever REMOVE candidates, never add false confidence to a real version -
+# Stage 1 is completely untouched by either of them.
+
+def looks_like_ip(value):
+    """True if the matched value is structurally a valid IPv4 address (four
+    octets, each 0-255). CMS version numbers essentially never take this
+    exact shape, so this is a safe, purely structural exclusion - e.g. the
+    target's own IP appearing in a <base href> tag, a Host header, etc."""
+    parts = value.split('.')
+    if len(parts) != 4:
+        return False
+    try:
+        return all(0 <= int(p) <= 255 for p in parts)
+    except ValueError:
+        return False
+
+# Keywords that, when found IMMEDIATELY before a matched number (small fixed
+# window, not the whole line), make it almost certainly a CSS/styling value
+# rather than a version string. Deliberately conservative and CSS-property-
+# specific - generic enough to catch real noise, narrow enough to never sit
+# right before a genuine "ProductName 1.2.3" or "?ver=1.2.3" style match.
+STAGE2_NEGATIVE_KEYWORDS = [
+    "opacity:", "opacity :",
+    "z-index:", "z-index :",
+    "rgba(", "rgb(",
+    "scale(", "scalex(", "scaley(", "scalez(",
+    "line-height:", "line-height :",
+]
+STAGE2_NEGATIVE_WINDOW = 20  # chars immediately before the match - intentionally tight
+
+def has_negative_context(text, offset):
+    lo = max(0, offset - STAGE2_NEGATIVE_WINDOW)
+    preceding = text[lo:offset].lower()
+    return any(kw in preceding for kw in STAGE2_NEGATIVE_KEYWORDS)
+
 def get_line_for_offset(text, offset, max_len=150):
     line_start = text.rfind('\n', 0, offset) + 1
     line_end = text.find('\n', offset)
@@ -432,7 +471,11 @@ def detect_versions(text):
     hits = [(m.group("version"), m.start()) for m in STAGE1_RE.finditer(text)]
     stage = 1
     if not hits:
-        hits = [(m.group(1), m.start()) for m in STAGE2_RE.finditer(text)]
+        stage2_hits = [(m.group(1), m.start()) for m in STAGE2_RE.finditer(text)]
+        hits = [
+            (v, off) for v, off in stage2_hits
+            if not looks_like_ip(v) and not has_negative_context(text, off)
+        ]
         stage = 2
     if not hits:
         return {"stage": 0, "top": [], "ambiguous": False}
