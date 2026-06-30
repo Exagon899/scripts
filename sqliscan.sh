@@ -36,6 +36,11 @@ read -rp "password field name [password]: " PFIELD
 PFIELD="${PFIELD:-password}"
 
 echo
+echo -e "${CYAN}[*] Optional: if you already know one value, leave the OTHER to be fuzzed.${NC}"
+read -rp "known username value (empty = fuzz it): " KNOWN_USER
+read -rp "known password value (empty = fuzz it): " KNOWN_PASS
+
+echo
 
 # ── pre-flight checks ────────────────────────────────────────────────────────
 
@@ -263,35 +268,75 @@ run_test() {
 
 echo -e "[*] Running tests...\n"
 
-run_test "${UFIELD}=FUZZ&${PFIELD}=baselinetest" \
-    "Step 1/3: Testing username field" \
-    "$TMPDIR/user.json" "$TMPDIR/user.flag" \
-    "$PFIELD" "baselinetest"
+DID_TARGETED=0
 
-run_test "${UFIELD}=baselinetest&${PFIELD}=FUZZ" \
-    "Step 2/3: Testing password field" \
-    "$TMPDIR/pass.json" "$TMPDIR/pass.flag" \
-    "$UFIELD" "baselinetest"
+# ── targeted modes (one or both values known) ────────────────────────────────
 
-run_test "${UFIELD}=FUZZ&${PFIELD}=FUZZ" \
-    "Step 3/3: Testing both fields (same payload)" \
-    "$TMPDIR/both.json" "$TMPDIR/both.flag" \
-    "both" "both"
+# known username -> fuzz password only
+if [ -n "$KNOWN_USER" ] && [ -z "$KNOWN_PASS" ]; then
+    echo -e "[*] Known username '${KNOWN_USER}' -> fuzzing PASSWORD field only\n"
+    run_test "${UFIELD}=${KNOWN_USER}&${PFIELD}=FUZZ" \
+        "Testing password (user=${KNOWN_USER})" \
+        "$TMPDIR/pass.json" "$TMPDIR/pass.flag" \
+        "$UFIELD" "$KNOWN_USER"
+    DID_TARGETED=1
 
-USER_FOUND=$(cat "$TMPDIR/user.flag" 2>/dev/null || echo 0)
-PASS_FOUND=$(cat "$TMPDIR/pass.flag" 2>/dev/null || echo 0)
-BOTH_FOUND=$(cat "$TMPDIR/both.flag" 2>/dev/null || echo 0)
+# known password -> fuzz username only
+elif [ -z "$KNOWN_USER" ] && [ -n "$KNOWN_PASS" ]; then
+    echo -e "[*] Known password '${KNOWN_PASS}' -> fuzzing USERNAME field only\n"
+    run_test "${UFIELD}=FUZZ&${PFIELD}=${KNOWN_PASS}" \
+        "Testing username (pass=${KNOWN_PASS})" \
+        "$TMPDIR/user.json" "$TMPDIR/user.flag" \
+        "$PFIELD" "$KNOWN_PASS"
+    DID_TARGETED=1
 
-if [ "$USER_FOUND" = "0" ] && [ "$PASS_FOUND" = "0" ] && [ "$BOTH_FOUND" = "0" ]; then
-    ffuf -w "${WORDLIST}:FUZZUSER" -w "${WORDLIST}:FUZZPASS" -X POST \
-        -d "${UFIELD}=FUZZUSER&${PFIELD}=FUZZPASS" \
-        -H "Content-Type: application/x-www-form-urlencoded" \
-        -u "$URL" -s -o "$TMPDIR/combo.json" -of json \
-        > /dev/null 2>&1 &
-    COMBO_PID=$!
-    spinner "$COMBO_PID" "Step 4/4: Full cross-product (last resort, ~5900 requests)"
-    wait "$COMBO_PID"
-    analyze "$TMPDIR/combo.json" "combination" "$TMPDIR/combo.flag" "both" "both"
+# both known -> fuzz each field with the other held static
+elif [ -n "$KNOWN_USER" ] && [ -n "$KNOWN_PASS" ]; then
+    echo -e "[*] Both values known -> fuzzing each field with the other held static\n"
+    run_test "${UFIELD}=FUZZ&${PFIELD}=${KNOWN_PASS}" \
+        "Testing username (pass=${KNOWN_PASS})" \
+        "$TMPDIR/user.json" "$TMPDIR/user.flag" \
+        "$PFIELD" "$KNOWN_PASS"
+    run_test "${UFIELD}=${KNOWN_USER}&${PFIELD}=FUZZ" \
+        "Testing password (user=${KNOWN_USER})" \
+        "$TMPDIR/pass.json" "$TMPDIR/pass.flag" \
+        "$UFIELD" "$KNOWN_USER"
+    DID_TARGETED=1
+fi
+
+# ── default mode (nothing known) ─────────────────────────────────────────────
+
+if [ "$DID_TARGETED" = "0" ]; then
+    run_test "${UFIELD}=FUZZ&${PFIELD}=baselinetest" \
+        "Step 1/3: Testing username field" \
+        "$TMPDIR/user.json" "$TMPDIR/user.flag" \
+        "$PFIELD" "baselinetest"
+
+    run_test "${UFIELD}=baselinetest&${PFIELD}=FUZZ" \
+        "Step 2/3: Testing password field" \
+        "$TMPDIR/pass.json" "$TMPDIR/pass.flag" \
+        "$UFIELD" "baselinetest"
+
+    run_test "${UFIELD}=FUZZ&${PFIELD}=FUZZ" \
+        "Step 3/3: Testing both fields (same payload)" \
+        "$TMPDIR/both.json" "$TMPDIR/both.flag" \
+        "both" "both"
+
+    USER_FOUND=$(cat "$TMPDIR/user.flag" 2>/dev/null || echo 0)
+    PASS_FOUND=$(cat "$TMPDIR/pass.flag" 2>/dev/null || echo 0)
+    BOTH_FOUND=$(cat "$TMPDIR/both.flag" 2>/dev/null || echo 0)
+
+    if [ "$USER_FOUND" = "0" ] && [ "$PASS_FOUND" = "0" ] && [ "$BOTH_FOUND" = "0" ]; then
+        ffuf -w "${WORDLIST}:FUZZUSER" -w "${WORDLIST}:FUZZPASS" -X POST \
+            -d "${UFIELD}=FUZZUSER&${PFIELD}=FUZZPASS" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -u "$URL" -s -o "$TMPDIR/combo.json" -of json \
+            > /dev/null 2>&1 &
+        COMBO_PID=$!
+        spinner "$COMBO_PID" "Step 4/4: Full cross-product (last resort, ~5900 requests)"
+        wait "$COMBO_PID"
+        analyze "$TMPDIR/combo.json" "combination" "$TMPDIR/combo.flag" "both" "both"
+    fi
 fi
 
 # ── results ───────────────────────────────────────────────────────────────────
