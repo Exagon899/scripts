@@ -53,7 +53,7 @@ if COOKIE_VALUE:
     SESSION.cookies.set(COOKIE_NAME, COOKIE_VALUE)
 
 # MySQL system schemas to skip when dumping "all" (still listed on screen)
-SKIP_DBS = ["information_schema", "performance_schema", "mysql", "sys"]
+SKIP_DBS = ["information_schema", "performance_schema", "sys"]
 
 # --- Request sender (GET -> query string, POST -> body) --------------------
 def send(payload):
