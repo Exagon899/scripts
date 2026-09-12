@@ -184,7 +184,7 @@ if not CHOSEN:
 print(f"[+] Using wrapper: {CHOSEN}\n")
 
 # MySQL system schemas to skip when dumping "all" (still listed on screen)
-SKIP_DBS = ["information_schema", "performance_schema", "mysql", "sys"]
+SKIP_DBS = ["information_schema", "performance_schema", "sys"]
 
 # --- Core oracle + extraction ----------------------------------------------
 def oracle(condition, tries=3):
