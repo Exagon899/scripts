@@ -47,7 +47,7 @@ if COOKIE_VALUE:
     SESSION.cookies.set(COOKIE_NAME, COOKIE_VALUE)
 
 # MySQL system schemas to skip when dumping "all" (still listed on screen)
-SKIP_DBS = ["information_schema", "performance_schema", "mysql", "sys"]
+SKIP_DBS = ["information_schema", "performance_schema", "sys"]
 
 # Match the data between our two ~ markers (non-greedy = closest pair).
 MARK = re.compile(r"~(.*?)~", re.S)
