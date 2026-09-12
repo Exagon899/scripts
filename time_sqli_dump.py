@@ -267,7 +267,7 @@ if not CHOSEN:
 print(f"[+] Using wrapper: {CHOSEN}\n")
 
 # MySQL/MariaDB system schemas to skip when dumping "all" (still listed)
-SKIP_DBS = ["information_schema", "performance_schema", "mysql", "sys"]
+SKIP_DBS = ["information_schema", "performance_schema", "sys"]
 
 # --- Character extraction ---------------------------------------------------
 # Cheap probes run before any binary search. FALSE costs one RTT, TRUE costs a
