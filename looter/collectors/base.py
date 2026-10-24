@@ -13,13 +13,16 @@ class BaseCollector:
     description: str = ""
     per_credential: bool = False
     requires = ("secretsdump",)
-    needs_ldap: bool = False      # True = only runs if target serves LDAP (a DC)
+    needs_ldap: bool = False       # only runs if target serves LDAP (a DC)
+    needs_admin_dc: bool = False   # only runs if a cred is admin on the target
 
-    def __init__(self, host: str, raw_dir: str, timeout: int = 300, verbose: bool = False):
+    def __init__(self, host: str, raw_dir: str, timeout: int = 300,
+                 verbose: bool = False, creds=None):
         self.host = host
         self.raw_dir = raw_dir
         self.timeout = timeout
         self.verbose = verbose
+        self.creds = list(creds) if creds else []   # whole host cred pool
 
     def collect_once(self, cred: Credential) -> List[Secret]:
         return []
