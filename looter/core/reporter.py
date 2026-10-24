@@ -1,4 +1,5 @@
-"""Output: ASCII banner + one unified rich table, plus JSON/CSV export."""
+"""Output: ASCII banner + one unified rich table, plus JSON/CSV export.
+Falls back to plain text if rich is not installed."""
 from __future__ import annotations
 
 import csv
@@ -9,13 +10,12 @@ from typing import List
 from .secret import Secret, Status
 
 BANNER = r"""
-   __  __   ____     ____   _____   _      ____    ____   _____
-  |  \/  | / __ \   / __ \ |  __ \ | |    / __ \  / __ \ |_   _|
-  | \  / || |  | | | |  | || |__) || |   | |  | || |  | |  | |
-  | |\/| || |  | | | |  | ||  _  / | |   | |  | || |  | |  | |
-  | |  | || |__| | | |__| || | \ \ | |___| |__| || |__| |  | |
-  |_|  |_| \____/   \____/ |_|  \_\|______\____/  \____/   |_|
-        moorloot  -  domain-joined Windows credential looter
+   ___              _ _  _             _
+  / __|_ _ ___ __ _| | || |_  _ _ _  _| |_ ___ _ _
+ | (__| '_/ -_) _` | | __ | || | ' \|  _/ -_) '_|
+  \___|_| \___\__,_|_|_||_|\_,_|_||_|\__\___|_|
+     CredHunter  -  domain-joined Windows credential looter
+                                        by exagon89
 """
 
 STATUS_STYLE = {
@@ -29,7 +29,7 @@ STATUS_STYLE = {
 
 def _truncate(s: str, n: int = 60) -> str:
     s = (s or "").replace("\n", " ")
-    return s if len(s) <= n else s[: n - 1] + "\u2026"
+    return s if len(s) <= n else s[: n - 3] + "..."
 
 
 def print_banner() -> None:
