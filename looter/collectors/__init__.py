@@ -1,22 +1,22 @@
-"""Collector registry. Add a collector here and it shows up automatically."""
+"""Collector registry."""
 from .sam_lsa import SamLsaCollector
 from .dpapi import (
     BrowserCollector, CredManCollector, VaultsCollector,
     RdgCollector, WifiCollector, CertificatesCollector,
 )
 from .nxc import VncCollector, PSHistoryCollector, SccmCollector
+from .ad import (
+    KerberoastCollector, AsrepRoastCollector, GmsaCollector,
+    LapsCollector, DescriptionsCollector, GppCollector,
+)
 
 ALL_COLLECTORS = [
     SamLsaCollector,
-    BrowserCollector,
-    CredManCollector,
-    VaultsCollector,
-    RdgCollector,
-    CertificatesCollector,
-    WifiCollector,
-    VncCollector,
-    PSHistoryCollector,
-    SccmCollector,
+    BrowserCollector, CredManCollector, VaultsCollector,
+    RdgCollector, CertificatesCollector, WifiCollector,
+    VncCollector, PSHistoryCollector, SccmCollector,
+    GppCollector, DescriptionsCollector, LapsCollector,
+    GmsaCollector, KerberoastCollector, AsrepRoastCollector,
 ]
 
 
