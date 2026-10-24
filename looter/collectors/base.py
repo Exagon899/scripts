@@ -28,5 +28,6 @@ class BaseCollector:
 
     def _raw_name(self, cred: Credential, suffix: str = "") -> str:
         who = (cred.username or "anon").replace("\\", "_").replace("/", "_")
+        safe = self.name.replace("/", "_").replace("\\", "_").replace(" ", "_")
         s = f"_{suffix}" if suffix else ""
-        return f"{self.name}_{who}{s}.txt"
+        return f"{safe}_{who}{s}.txt"
