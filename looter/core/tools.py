@@ -33,6 +33,25 @@ def ldap_reachable(host: str, timeout: float = 2.0) -> bool:
     return tcp_open(host, 389, timeout) or tcp_open(host, 636, timeout)
 
 
+def smb_admin(host, cred, timeout: int = 6) -> bool:
+    """True if the credential is local admin on the host (can open the ADMIN$
+    share). Cheap proxy for 'can DCSync / dump NTDS' so those collectors auto-skip
+    when no credential is privileged."""
+    try:
+        from impacket.smbconnection import SMBConnection
+    except ImportError:
+        return True        # cannot check -> let the collector try
+    try:
+        c = SMBConnection(host, host, timeout=timeout)
+        c.login(cred.username, cred.password or "", cred.domain,
+                cred.lmhash or "", cred.nthash or "")
+        c.connectTree("ADMIN$")       # admin-only
+        c.logoff()
+        return True
+    except Exception:
+        return False
+
+
 TOOL_CANDIDATES = {
     "secretsdump": ["impacket-secretsdump", "secretsdump.py", "secretsdump"],
     "dploot": ["dploot"],
