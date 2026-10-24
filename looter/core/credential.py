@@ -146,4 +146,21 @@ class CredentialPool:
         self.creds.append(cred)
 
     def for_host(self, host: str) -> "CredentialPool":
-        return CredentialPool([c for c in self.creds if
+        return CredentialPool([c for c in self.creds if c.applies_to(host)])
+
+    def __iter__(self):
+        return iter(self.creds)
+
+    def __len__(self):
+        return len(self.creds)
+
+    @classmethod
+    def from_file(cls, path: str, default_domain: str = "", local: bool = False) -> "CredentialPool":
+        pool = cls()
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                pool.add(parse_credential(line, default_domain, local))
+        return pool
