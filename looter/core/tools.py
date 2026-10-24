@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import List, Optional
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(s: str) -> str:
+    """Remove ANSI colour codes. dploot/nxc colour their output, which otherwise
+    breaks line parsing."""
+    return _ANSI_RE.sub("", s)
+
 
 TOOL_CANDIDATES = {
     "secretsdump": ["impacket-secretsdump", "secretsdump.py", "secretsdump"],
@@ -42,9 +52,11 @@ class CmdResult:
 
 def run(cmd: List[str], timeout: int = 300, raw_dir: Optional[str] = None,
         raw_name: Optional[str] = None) -> CmdResult:
+    """Run a command, capture output, optionally persist raw output to disk."""
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, errors="ignore",
+            cmd, capture_output=True, text=True, timeout=timeout,
+            errors="ignore",
         )
         res = CmdResult(cmd, proc.returncode, proc.stdout or "", proc.stderr or "")
     except subprocess.TimeoutExpired as e:
