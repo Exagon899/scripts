@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import socket
 import subprocess
 from dataclasses import dataclass
 from typing import List, Optional
@@ -13,9 +14,23 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def strip_ansi(s: str) -> str:
-    """Remove ANSI colour codes. dploot/nxc colour their output, which otherwise
-    breaks line parsing."""
+    """Remove ANSI colour codes (dploot/nxc colour output, which breaks parsing)."""
     return _ANSI_RE.sub("", s)
+
+
+def tcp_open(host: str, port: int, timeout: float = 2.0) -> bool:
+    """Quick TCP connect check."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def ldap_reachable(host: str, timeout: float = 2.0) -> bool:
+    """True if LDAP (389) or LDAPS (636) answers - i.e. the target is a DC.
+    Used to skip AD collectors against non-DC hosts instead of hanging on them."""
+    return tcp_open(host, 389, timeout) or tcp_open(host, 636, timeout)
 
 
 TOOL_CANDIDATES = {
