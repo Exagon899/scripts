@@ -10,12 +10,14 @@ from typing import List
 from .secret import Secret, Status
 
 BANNER = r"""
-   ___              _ _  _             _
-  / __|_ _ ___ __ _| | || |_  _ _ _  _| |_ ___ _ _
- | (__| '_/ -_) _` | | __ | || | ' \|  _/ -_) '_|
-  \___|_| \___\__,_|_|_||_|\_,_|_||_|\__\___|_|
-     CredHunter  -  domain-joined Windows credential looter
-                                        by exagon89
+  _____              _ _    _             _
+ / ____|            | | |  | |           | |
+| |     _ __ ___  __| | |__| |_   _ _ __ | |_ ___ _ __
+| |    | '__/ _ \/ _` |  __  | | | | '_ \| __/ _ \ '__|
+| |____| | |  __/ (_| | |  | | |_| | | | | ||  __/ |
+ \_____|_|  \___|\__,_|_|  |_|\__,_|_| |_|\__\___|_|
+
+        domain-joined Windows credential looter  -  by exagon89
 """
 
 STATUS_STYLE = {
