@@ -1,8 +1,5 @@
 """Phase 2 - the Active Directory side, looted with one domain credential against
-a DC (point -t at the DC):
-  - GPP passwords in SYSVOL, AD descriptions, LAPS, gMSA, Kerberoast, AS-REP
-All via NetExec (nxc). Run once per host with the first working credential.
-"""
+a DC: GPP passwords, AD descriptions, LAPS, gMSA, Kerberoast, AS-REP. Via nxc."""
 from __future__ import annotations
 
 import re
@@ -21,6 +18,7 @@ NXC_LINE = re.compile(r"^\s*\S+\s+\S+\s+\d+\s+\S+\s+(.*)$")
 class _AdNxc(BaseCollector):
     per_credential = False
     requires = ("nxc",)
+    needs_ldap = True            # AD loot only makes sense against a DC
     proto = "ldap"
     extra: List[str] = []
 
