@@ -1,15 +1,15 @@
 """Orchestrator: targets x collectors x credential-pool (scoped per host).
-Progress: one spinning status line (no cred names); -v for the detailed log."""
+Finished collectors print a line that stays; the active one shows on a spinning
+pipe below. AD collectors auto-skip on hosts without LDAP (non-DC). -v = detailed log."""
 from __future__ import annotations
 
 import os
 import sys
-from contextlib import contextmanager
-from typing import List, Type
+from typing import List, Optional, Type
 
 from .credential import CredentialPool
 from .secret import Secret
-from .tools import find_tool
+from .tools import find_tool, ldap_reachable
 from collectors.base import BaseCollector
 
 
@@ -17,42 +17,56 @@ def _log(msg: str) -> None:
     print(f"[*] {msg}", file=sys.stderr)
 
 
-@contextmanager
-def _spinner(enabled: bool):
-    if not enabled:
-        yield lambda msg: None
-        return
-    try:
-        from rich.console import Console
-        console = Console(stderr=True)
-        with console.status("[bold green]starting...", spinner="dots") as st:
-            yield lambda msg: st.update(f"[bold green]{msg}")
-        return
-    except Exception:
-        yield lambda msg: None
-
-
 def run_all(targets: List[str], pool: CredentialPool,
             collectors: List[Type[BaseCollector]], out_dir: str,
             timeout: int = 300, verbose: bool = False) -> List[Secret]:
     results: List[Secret] = []
-    use_spinner = not verbose
 
-    with _spinner(use_spinner) as spin:
+    console = None
+    status = None
+    if not verbose:
+        try:
+            from rich.console import Console
+            console = Console(stderr=True)
+            status = console.status("[bold green]starting...", spinner="line")
+            status.start()
+        except Exception:
+            console = None
+
+    def line(msg: str) -> None:
+        if console is not None:
+            console.print(msg, highlight=False)
+        else:
+            print(msg, file=sys.stderr)
+
+    def active(msg: str) -> None:
+        if status is not None:
+            status.update(f"[bold green]{msg}")
+
+    try:
         for host in targets:
             hpool = pool.for_host(host)
-            if verbose:
-                _log(f"=== target {host} ({len(hpool)} cred(s)) ===")
+            line(f"[bold]== {host} ==[/bold]  ({len(hpool)} cred(s))" if console
+                 else f"== {host} == ({len(hpool)} cred(s))")
+
             raw_dir = os.path.join(out_dir, "raw", host.replace(":", "_"))
+            ldap_ok: Optional[bool] = None
 
             for Col in collectors:
                 missing = [t for t in Col.requires if not find_tool(t)]
                 if missing:
-                    if verbose:
-                        _log(f"{host} {Col.name}: skipped (missing {','.join(missing)})")
+                    line(f"   {Col.name:<12} skipped (missing {','.join(missing)})")
                     continue
 
-                spin(f"{host}  looting  {Col.description or Col.name}")
+                if Col.needs_ldap:
+                    if ldap_ok is None:
+                        active(f"{host}  checking LDAP")
+                        ldap_ok = ldap_reachable(host)
+                    if not ldap_ok:
+                        line(f"   {Col.name:<12} skipped (no LDAP - not a DC)")
+                        continue
+
+                active(f"{host}  looting  {Col.description or Col.name}")
                 col = Col(host=host, raw_dir=raw_dir, timeout=timeout, verbose=verbose)
                 got: List[Secret] = []
 
@@ -71,8 +85,11 @@ def run_all(targets: List[str], pool: CredentialPool,
                             break
 
                 n = _merge(results, got)
-                if verbose:
-                    _log(f"{host} {Col.name}: {n} new finding(s)")
+                mark = f"[green]{n:>3}[/green]" if (console and n) else f"{n:>3}"
+                line(f"   {Col.name:<12} {mark} finding(s)")
+    finally:
+        if status is not None:
+            status.stop()
 
     return results
 
