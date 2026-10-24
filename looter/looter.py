@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""moorloot - domain-joined Windows credential looter (Phase 1 / MVP)."""
+"""CredHunter - domain-joined Windows credential looter.
+
+Feed every credential you already own; it runs the collectors against the
+target(s), auto-decrypts what each credential can unlock (e.g. browser logins ->
+cleartext), and prints one unified table. Raw tool output saved per host.
+
+Credential forms (--cred, repeatable, or --cred-file):
+  DOMAIN/user:Password
+  DOMAIN/user#<nthash>            (or #<lmhash>:<nthash>)
+  DOMAIN/user%ccache:/path.ccache
+  HOST=DOMAIN/user:Password       (bind a cred to one target only)
+"""
 from __future__ import annotations
 
 import argparse
@@ -17,17 +28,20 @@ from collectors import ALL_COLLECTORS, registry                        # noqa: E
 
 def build_args() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="moorloot - unified Windows credential looter (MVP)",
-        formatter_class=argparse.RawDescriptionHelpFormatter)
+        description="CredHunter - unified Windows credential looter",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__)
     p.add_argument("-t", "--target", action="append", default=[],
                    help="target host/IP (repeatable)")
     p.add_argument("--target-file", help="file with one target per line")
     p.add_argument("--cred", action="append", default=[],
-                   help="DOMAIN/user:pass or DOMAIN/user#nthash (repeatable)")
+                   help="credential, e.g. DOMAIN/user:pass or DOMAIN/user#nthash (repeatable)")
     p.add_argument("--cred-file", help="file with one credential per line")
-    p.add_argument("-d", "--domain", default="", help="default domain")
-    p.add_argument("--local-auth", action="store_true", help="treat creds as local (SAM)")
-    p.add_argument("-o", "--out", default="moorloot_loot", help="output directory")
+    p.add_argument("-d", "--domain", default="", help="default domain for creds without one")
+    p.add_argument("--local-auth", action="store_true",
+                   help="treat credentials as local (SAM) accounts")
+    p.add_argument("-o", "--out", default="credhunter_loot",
+                   help="output directory (raw output + exports)")
     p.add_argument("--json", action="store_true", help="export loot.json")
     p.add_argument("--csv", action="store_true", help="export loot.csv")
     p.add_argument("--only", help="comma list of collectors to run (see --list)")
