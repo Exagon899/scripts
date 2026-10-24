@@ -7,7 +7,7 @@ from typing import List
 
 from core.credential import Credential
 from core.secret import Secret, Status
-from core.tools import find_tool, run
+from core.tools import find_tool, run, strip_ansi
 from .base import BaseCollector
 
 NXC_LINE = re.compile(r"^\s*\S+\s+\S+\s+\d+\s+\S+\s+(.*)$")
@@ -31,7 +31,7 @@ class _NxcModule(BaseCollector):
 
     def _messages(self, out: str) -> List[str]:
         msgs = []
-        for line in out.splitlines():
+        for line in strip_ansi(out).splitlines():
             m = NXC_LINE.match(line)
             if m:
                 msgs.append(m.group(1).strip())
