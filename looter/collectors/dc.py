@@ -1,7 +1,7 @@
 """DC-only loot (needs DCSync/DA rights, fails gracefully otherwise):
   - NTDS.dit domain hashes      (impacket-secretsdump -just-dc-ntlm)
   - DPAPI domain backup key     (dploot backupkey) -> decrypts every user's DPAPI
-Both only run against a DC (needs_ldap)."""
+Both only run against a DC (needs_ldap) and only if a cred is admin (needs_admin_dc)."""
 from __future__ import annotations
 
 import re
@@ -20,6 +20,7 @@ class NtdsCollector(BaseCollector):
     description = "Full NTDS.dit domain hashes (needs DCSync/DA)"
     per_credential = False
     needs_ldap = True
+    needs_admin_dc = True            # auto-skip unless a cred is admin on the DC
     requires = ("secretsdump",)
 
     def collect_once(self, cred: Credential) -> List[Secret]:
@@ -46,6 +47,7 @@ class BackupkeyCollector(BaseCollector):
     description = "DPAPI domain backup key (needs DA) - decrypts all user DPAPI"
     per_credential = True
     needs_ldap = True
+    needs_admin_dc = True
     requires = ("dploot",)
 
     def collect_with_cred(self, cred: Credential) -> List[Secret]:
