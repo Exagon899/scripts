@@ -1,7 +1,7 @@
 """Orchestrator: targets x collectors x credential-pool (scoped per host).
-Finished collectors print a line that stays; the active one shows on a spinner
-below. AD collectors auto-skip on non-DC hosts. If the target goes unreachable
-(tunnel drop) the scan pauses and waits for reconnect. -v = detailed log."""
+Finished collectors print a line that stays; the active one shows on a spinner.
+AD collectors auto-skip on non-DC hosts (LDAP check); NTDS/BackupKey auto-skip
+unless a cred is admin on the DC. Pauses & waits on connection loss. -v = log."""
 from __future__ import annotations
 
 import os
@@ -11,7 +11,7 @@ from typing import List, Optional, Type
 
 from .credential import CredentialPool
 from .secret import Secret
-from .tools import find_tool, ldap_reachable, tcp_open
+from .tools import find_tool, ldap_reachable, tcp_open, smb_admin
 from collectors.base import BaseCollector
 
 
@@ -20,8 +20,6 @@ def _log(msg: str) -> None:
 
 
 def _wait_reachable(host: str, line, active) -> None:
-    """Pause while the target is unreachable and resume once it comes back.
-    Ctrl-C aborts the whole run."""
     if tcp_open(host, 445, 2):
         return
     line(f"[yellow]!! lost connection to {host} - waiting for reconnect "
@@ -68,6 +66,7 @@ def run_all(targets: List[str], pool: CredentialPool,
 
             raw_dir = os.path.join(out_dir, "raw", host.replace(":", "_"))
             ldap_ok: Optional[bool] = None
+            admin_ok: Optional[bool] = None
 
             for Col in collectors:
                 missing = [t for t in Col.requires if not find_tool(t)]
@@ -83,9 +82,18 @@ def run_all(targets: List[str], pool: CredentialPool,
                         line(f"   {Col.name:<12} skipped (no LDAP - not a DC)")
                         continue
 
+                if Col.needs_admin_dc:
+                    if admin_ok is None:
+                        active(f"{host}  checking admin/DCSync rights")
+                        admin_ok = any(smb_admin(host, c) for c in hpool)
+                    if not admin_ok:
+                        line(f"   {Col.name:<12} skipped (no admin/DCSync on target)")
+                        continue
+
                 _wait_reachable(host, line, active)
                 active(f"{host}  looting  {Col.description or Col.name}")
-                col = Col(host=host, raw_dir=raw_dir, timeout=timeout, verbose=verbose)
+                col = Col(host=host, raw_dir=raw_dir, timeout=timeout,
+                          verbose=verbose, creds=list(hpool))
                 got: List[Secret] = []
 
                 if Col.per_credential:
