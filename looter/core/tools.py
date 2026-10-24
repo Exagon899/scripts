@@ -1,5 +1,10 @@
-"""Subprocess helpers + external-tool discovery. Orchestrates proven CLIs
-(impacket-secretsdump, dploot, netexec) and always saves raw output to disk."""
+"""Subprocess helpers + external-tool discovery.
+
+Design choice: this MVP orchestrates proven CLIs (impacket-secretsdump, dploot,
+netexec) rather than re-implementing their protocol/crypto code. That keeps it
+reliable across tool versions. Every command's raw output is always written to
+the loot directory, so even if a parser misses something, nothing is lost.
+"""
 from __future__ import annotations
 
 import os
@@ -14,12 +19,10 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def strip_ansi(s: str) -> str:
-    """Remove ANSI colour codes (dploot/nxc colour output, which breaks parsing)."""
     return _ANSI_RE.sub("", s)
 
 
 def tcp_open(host: str, port: int, timeout: float = 2.0) -> bool:
-    """Quick TCP connect check."""
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
@@ -28,15 +31,14 @@ def tcp_open(host: str, port: int, timeout: float = 2.0) -> bool:
 
 
 def ldap_reachable(host: str, timeout: float = 2.0) -> bool:
-    """True if LDAP (389) or LDAPS (636) answers - i.e. the target is a DC.
-    Used to skip AD collectors against non-DC hosts instead of hanging on them."""
     return tcp_open(host, 389, timeout) or tcp_open(host, 636, timeout)
 
 
+def mssql_reachable(host: str, timeout: float = 2.0) -> bool:
+    return tcp_open(host, 1433, timeout)
+
+
 def smb_admin(host, cred, timeout: int = 6) -> bool:
-    """True if the credential is local admin on the host (can open the ADMIN$
-    share). Cheap proxy for 'can DCSync / dump NTDS' so those collectors auto-skip
-    when no credential is privileged."""
     try:
         from impacket.smbconnection import SMBConnection
     except ImportError:
@@ -86,7 +88,6 @@ class CmdResult:
 
 def run(cmd: List[str], timeout: int = 300, raw_dir: Optional[str] = None,
         raw_name: Optional[str] = None) -> CmdResult:
-    """Run a command, capture output, optionally persist raw output to disk."""
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
