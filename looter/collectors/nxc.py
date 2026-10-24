@@ -1,5 +1,5 @@
-"""VNC passwords, PowerShell history, SCCM via NetExec. Run once per host with an
-admin cred. Tolerant parsing; raw output saved."""
+"""Loot that NetExec (nxc) modules do well: VNC, PowerShell history, SCCM,
+autologon, event-log creds, Veeam. Run once per host with an admin credential."""
 from __future__ import annotations
 
 import re
@@ -84,3 +84,36 @@ class SccmCollector(_NxcModule):
                 found.append(Secret(self.host, "SCCM", m.group(2), m.group(4),
                                     Status.CLEARTEXT, secret_type="password"))
         return found
+
+
+class _UserPassNxc(_NxcModule):
+    """Shared parser for modules that print a user + password pair somewhere."""
+    def _parse(self, out: str) -> List[Secret]:
+        found = []
+        user = None
+        for msg in self._messages(out):
+            mu = re.search(r"(?:user(?:name)?|account|login)[\s:=]+([^\s]+)", msg, re.I)
+            mp = re.search(r"(?:password|pass|pwd|secret)[\s:=]+([^\s]+)", msg, re.I)
+            if mu and not mp:
+                user = mu.group(1)
+            if mp:
+                found.append(Secret(self.host, self.source, (mu.group(1) if mu else user) or "",
+                                    mp.group(1), Status.CLEARTEXT, secret_type="password",
+                                    notes=self.source))
+                user = None
+        return found
+
+
+class AutologonCollector(_UserPassNxc):
+    name = "Autologon"; source = "Autologon"; module = "gpp_autologin"
+    description = "Registry/GPP autologon credentials (Winlogon)"
+
+
+class EventlogCollector(_UserPassNxc):
+    name = "EventLog"; source = "EventLog"; module = "eventlog_creds"
+    description = "Credentials in Security event log (4688 command lines)"
+
+
+class VeeamCollector(_UserPassNxc):
+    name = "Veeam"; source = "Veeam"; module = "veeam"
+    description = "Veeam Backup stored credentials"
