@@ -1,8 +1,8 @@
 """DPAPI-protected loot via the dploot CLI (v4): browser passwords/cookies,
-Credential Manager, Vaults, certificates, RDCMan (.rdg), WiFi, WAM, MobaXterm,
-plus MACHINE DPAPI stores. dploot reads blobs over the C$ admin share, so we
-authenticate as an admin cred and feed the WHOLE pool via --passwords/--nthashes
-so other users' masterkeys (e.g. melissa in marcus' Chrome) get decrypted too."""
+Credential Manager, Vaults, certificates, RDCMan, WiFi, WAM, MobaXterm, SCCM NAA,
+plus MACHINE DPAPI. dploot reads blobs over the C$ admin share, so we auth as an
+admin cred and feed the WHOLE pool via --passwords/--nthashes so other users'
+masterkeys get decrypted too. Modules without --passwords set user_level=False."""
 from __future__ import annotations
 
 import os
@@ -43,7 +43,7 @@ class _DplootModule(BaseCollector):
     module = ""
     source = ""
     module_extra: List[str] = []
-    user_level = True          # machine modules set this False
+    user_level = True          # modules without --passwords set this False
 
     def _pool_files(self) -> List[str]:
         self._tmp = []
@@ -139,7 +139,14 @@ class RdgCollector(_DplootModule):
 
 class WifiCollector(_DplootModule):
     name = "WiFi"; source = "WiFi"; module = "wifi"
+    user_level = False
     description = "WLAN profile PSK / 802.1X"
+
+
+class SccmCollector(_DplootModule):
+    name = "SCCM"; source = "SCCM"; module = "sccm"
+    user_level = False
+    description = "SCCM Network Access Account (NAA) credentials"
 
 
 class WamCollector(_DplootModule):
