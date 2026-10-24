@@ -1,6 +1,6 @@
-"""DPAPI loot via the dploot CLI: browser pw/cookies, Credential Manager, Vaults,
-certificates, RDCMan (.rdg), WiFi. Per-credential: tries every cred, decrypts
-what it can. Tolerant parsing; raw output always saved."""
+"""DPAPI-protected loot via the dploot CLI: browser passwords/cookies, Windows
+Credential Manager, Vaults, certificates, RDCMan (.rdg), WiFi. Per-credential:
+tries every cred, decrypts what it can. Tolerant parsing; raw output saved."""
 from __future__ import annotations
 
 import re
@@ -8,7 +8,7 @@ from typing import List
 
 from core.credential import Credential
 from core.secret import Secret, Status
-from core.tools import find_tool, run
+from core.tools import find_tool, run, strip_ansi
 from .base import BaseCollector
 
 URL_RE = re.compile(r"(https?://\S+)", re.I)
@@ -48,14 +48,17 @@ class _DplootModule(BaseCollector):
     def _parse(self, out: str) -> List[Secret]:
         found: List[Secret] = []
         buf: dict = {}
-        for line in out.splitlines():
+        for line in strip_ansi(out).splitlines():   # dploot colours its output
             if not line.strip():
                 if buf:
                     found += _flush(self.host, self.source, buf); buf = {}
                 continue
             m = KV_RE.match(line)
             if m:
-                buf[m.group(1).lower()] = m.group(2)
+                key = m.group(1).lower()
+                if key in buf:
+                    found += _flush(self.host, self.source, buf); buf = {}
+                buf[key] = m.group(2)
                 continue
             if buf:
                 found += _flush(self.host, self.source, buf); buf = {}
@@ -103,6 +106,7 @@ class CertificatesCollector(_DplootModule):
     description = "User/machine certificates + private keys (client-auth = ADCS/PKINIT)"
 
     def _parse(self, out: str) -> List[Secret]:
+        out = strip_ansi(out)
         found: List[Secret] = []
         for line in out.splitlines():
             low = line.lower()
