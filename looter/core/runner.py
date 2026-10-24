@@ -1,20 +1,37 @@
 """Orchestrator: targets x collectors x credential-pool (scoped per host).
-Finished collectors print a line that stays; the active one shows on a spinning
-pipe below. AD collectors auto-skip on hosts without LDAP (non-DC). -v = detailed log."""
+Finished collectors print a line that stays; the active one shows on a spinner
+below. AD collectors auto-skip on non-DC hosts. If the target goes unreachable
+(tunnel drop) the scan pauses and waits for reconnect. -v = detailed log."""
 from __future__ import annotations
 
 import os
 import sys
+import time
 from typing import List, Optional, Type
 
 from .credential import CredentialPool
 from .secret import Secret
-from .tools import find_tool, ldap_reachable
+from .tools import find_tool, ldap_reachable, tcp_open
 from collectors.base import BaseCollector
 
 
 def _log(msg: str) -> None:
     print(f"[*] {msg}", file=sys.stderr)
+
+
+def _wait_reachable(host: str, line, active) -> None:
+    """Pause while the target is unreachable and resume once it comes back.
+    Ctrl-C aborts the whole run."""
+    if tcp_open(host, 445, 2):
+        return
+    line(f"[yellow]!! lost connection to {host} - waiting for reconnect "
+         f"(Ctrl-C to abort)[/yellow]")
+    while True:
+        active(f"{host}  waiting for reconnect...")
+        time.sleep(5)
+        if tcp_open(host, 445, 2):
+            line(f"[green]** reconnected to {host}, continuing[/green]")
+            return
 
 
 def run_all(targets: List[str], pool: CredentialPool,
@@ -66,6 +83,7 @@ def run_all(targets: List[str], pool: CredentialPool,
                         line(f"   {Col.name:<12} skipped (no LDAP - not a DC)")
                         continue
 
+                _wait_reachable(host, line, active)
                 active(f"{host}  looting  {Col.description or Col.name}")
                 col = Col(host=host, raw_dir=raw_dir, timeout=timeout, verbose=verbose)
                 got: List[Secret] = []
