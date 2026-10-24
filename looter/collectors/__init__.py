@@ -1,32 +1,60 @@
-"""Collector registry."""
+"""Collector registry. Add a collector here and it shows up automatically."""
 from .sam_lsa import SamLsaCollector
 from .dpapi import (
     BrowserCollector, CredManCollector, VaultsCollector, RdgCollector,
     WifiCollector, CertificatesCollector, WamCollector, MobaXtermCollector,
-    MachineCredsCollector, MachineVaultsCollector, MachineCertsCollector,
+    SccmCollector, MachineCredsCollector, MachineVaultsCollector,
+    MachineCertsCollector,
 )
 from .nxc import (
-    VncCollector, PSHistoryCollector, SccmCollector,
-    AutologonCollector, EventlogCollector, VeeamCollector,
+    VncCollector, PSHistoryCollector, AutologonCollector, EventlogCollector,
+    VeeamCollector, LsassCollector, PuttyCollector, MremotengCollector,
+    WinscpCollector, MssqlCollector,
 )
 from .filehunt import FileHuntCollector
 from .ad import (
     KerberoastCollector, AsrepRoastCollector, GmsaCollector,
     LapsCollector, DescriptionsCollector, GppCollector,
 )
-from .dc import NtdsCollector, BackupkeyCollector
+from .dc import NtdsCollector, VssCollector, BackupkeyCollector
 
 ALL_COLLECTORS = [
+    # --- host credential stores (target a host you are admin on) ---
     SamLsaCollector,
-    BrowserCollector, CredManCollector, VaultsCollector, RdgCollector,
-    CertificatesCollector, WifiCollector, WamCollector, MobaXtermCollector,
-    VncCollector, PSHistoryCollector, AutologonCollector, EventlogCollector,
-    SccmCollector, VeeamCollector,
-    MachineCredsCollector, MachineVaultsCollector, MachineCertsCollector,
+    LsassCollector,
+    BrowserCollector,
+    CredManCollector,
+    VaultsCollector,
+    RdgCollector,
+    CertificatesCollector,
+    WifiCollector,
+    WamCollector,
+    MobaXtermCollector,
+    PuttyCollector,
+    MremotengCollector,
+    WinscpCollector,
+    VncCollector,
+    PSHistoryCollector,
+    AutologonCollector,
+    EventlogCollector,
+    SccmCollector,
+    VeeamCollector,
+    MssqlCollector,
+    MachineCredsCollector,
+    MachineVaultsCollector,
+    MachineCertsCollector,
     FileHuntCollector,
-    GppCollector, DescriptionsCollector, LapsCollector, GmsaCollector,
-    KerberoastCollector, AsrepRoastCollector,
-    NtdsCollector, BackupkeyCollector,
+    # --- Active Directory (target the DC) ---
+    GppCollector,
+    DescriptionsCollector,
+    LapsCollector,
+    GmsaCollector,
+    KerberoastCollector,
+    AsrepRoastCollector,
+    # --- DC-only, needs DCSync/DA (admin) ---
+    NtdsCollector,
+    VssCollector,
+    BackupkeyCollector,
 ]
 
 
