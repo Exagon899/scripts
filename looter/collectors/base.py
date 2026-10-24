@@ -13,6 +13,7 @@ class BaseCollector:
     description: str = ""
     per_credential: bool = False
     requires = ("secretsdump",)
+    needs_ldap: bool = False      # True = only runs if target serves LDAP (a DC)
 
     def __init__(self, host: str, raw_dir: str, timeout: int = 300, verbose: bool = False):
         self.host = host
