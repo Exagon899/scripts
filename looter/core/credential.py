@@ -1,12 +1,13 @@
-"""Credential pool. Feed every credential you own; each collector tries the whole
-pool so e.g. a browser blob owned by marcus gets decrypted with marcus' password.
+"""Credential pool. Feed every credential you own; each collector tries the pool.
 
-Forms (CLI --cred, repeatable, or one per line in --cred-file):
+Forms (--cred, repeatable, or one per line in --cred-file):
     DOMAIN/user:Password123
-    DOMAIN/user#aad3b...:<nthash>
-    DOMAIN/user#<nthash>
+    DOMAIN/user#aad3b...:<nthash>        (LM:NT)
+    DOMAIN/user#<nthash>                 (NT only)
     user:Password123
     DOMAIN/user%ccache:/path/to.ccache
+Host scoping (bind a cred to ONE target, only tried there):
+    192.168.1.10=DOMAIN/user:Password123
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 EMPTY_LM = "aad3b435b51404eeaad3b435b51404ee"
+_HOSTISH = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 @dataclass
@@ -26,18 +28,25 @@ class Credential:
     nthash: Optional[str] = None
     ccache: Optional[str] = None
     local: bool = False
+    host: Optional[str] = None
 
     @property
     def label(self) -> str:
         d = self.domain or ("LOCAL" if self.local else "")
         base = f"{d}\\{self.username}" if d else self.username
         if self.password is not None:
-            return f"{base} (pw)"
-        if self.nthash:
-            return f"{base} (hash)"
-        if self.ccache:
-            return f"{base} (ccache)"
-        return base
+            kind = "pw"
+        elif self.nthash:
+            kind = "hash"
+        elif self.ccache:
+            kind = "ccache"
+        else:
+            kind = "?"
+        scope = f"@{self.host}" if self.host else ""
+        return f"{base}{scope} ({kind})"
+
+    def applies_to(self, host: str) -> bool:
+        return self.host is None or self.host == host
 
     def secretsdump_target(self, host: str) -> str:
         dom = self.domain + "/" if self.domain else ""
@@ -85,6 +94,13 @@ class Credential:
 
 def parse_credential(raw: str, default_domain: str = "", local: bool = False) -> Credential:
     raw = raw.strip()
+
+    host = None
+    if "=" in raw:
+        left, right = raw.split("=", 1)
+        if _HOSTISH.match(left):
+            host, raw = left, right
+
     ccache = None
     if "%ccache:" in raw:
         raw, ccache = raw.split("%ccache:", 1)
@@ -118,6 +134,7 @@ def parse_credential(raw: str, default_domain: str = "", local: bool = False) ->
         nthash=nthash.strip() if nthash else None,
         ccache=ccache.strip() if ccache else None,
         local=local,
+        host=host.strip() if host else None,
     )
 
 
@@ -128,19 +145,5 @@ class CredentialPool:
     def add(self, cred: Credential) -> None:
         self.creds.append(cred)
 
-    def __iter__(self):
-        return iter(self.creds)
-
-    def __len__(self):
-        return len(self.creds)
-
-    @classmethod
-    def from_file(cls, path: str, default_domain: str = "", local: bool = False) -> "CredentialPool":
-        pool = cls()
-        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                pool.add(parse_credential(line, default_domain, local))
-        return pool
+    def for_host(self, host: str) -> "CredentialPool":
+        return CredentialPool([c for c in self.creds if
