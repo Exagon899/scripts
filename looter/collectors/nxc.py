@@ -1,6 +1,6 @@
-"""Loot that NetExec (nxc) modules do well: VNC, PowerShell history, autologon,
-event-log creds, Veeam, live LSASS, PuTTY/mRemoteNG/WinSCP, MSSQL. Run once per
-host with an admin credential (MSSQL needs 1433)."""
+"""Loot that NetExec (nxc) modules do well: VNC, PS history, LSASS, autologon,
+eventlog, Veeam, PuTTY, mRemoteNG, WinSCP, MSSQL. Run once per host with an admin
+credential. Tolerant line parsing; raw output always saved."""
 from __future__ import annotations
 
 import re
