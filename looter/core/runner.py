@@ -1,7 +1,18 @@
 """Orchestrator: targets x collectors x credential-pool (scoped per host).
-Finished collectors print a line that stays; the active one shows on a spinner.
-AD collectors auto-skip on non-DC hosts (LDAP check); NTDS/BackupKey auto-skip
-unless a cred is admin on the DC. Pauses & waits on connection loss. -v = log."""
+
+Progress: every finished collector prints its own line that STAYS on screen; the
+currently-running collector is shown on a live spinner line (a spinning pipe)
+right below. Use -v for the detailed per-credential log instead.
+
+Gating (checked once per host, only if a collector needs it): LDAP reachable
+(=DC) for AD collectors; a cred being local-admin for everything that reads the
+target's SAM/registry/C$; MSSQL (1433) open for the MSSQL collector. Anything
+whose precondition is not met is skipped instantly instead of hanging.
+
+per_credential == False  (SAM/LSA, nxc, AD): try creds until one works, then stop.
+per_credential == True   (DPAPI/dploot): try ALL creds (each may decrypt a
+                          different user's blobs); aggregate everything.
+"""
 from __future__ import annotations
 
 import os
@@ -11,7 +22,7 @@ from typing import List, Optional, Type
 
 from .credential import CredentialPool
 from .secret import Secret
-from .tools import find_tool, ldap_reachable, tcp_open, smb_admin
+from .tools import find_tool, ldap_reachable, tcp_open, smb_admin, mssql_reachable
 from collectors.base import BaseCollector
 
 
@@ -20,6 +31,8 @@ def _log(msg: str) -> None:
 
 
 def _wait_reachable(host: str, line, active) -> None:
+    """Pause the scan while the target is unreachable (e.g. tunnel dropped) and
+    resume once it comes back. Ctrl-C aborts the whole run."""
     if tcp_open(host, 445, 2):
         return
     line(f"[yellow]!! lost connection to {host} - waiting for reconnect "
@@ -49,6 +62,7 @@ def run_all(targets: List[str], pool: CredentialPool,
             console = None
 
     def line(msg: str) -> None:
+        """A progress line that stays on screen (printed above the live spinner)."""
         if console is not None:
             console.print(msg, highlight=False)
         else:
@@ -65,8 +79,11 @@ def run_all(targets: List[str], pool: CredentialPool,
                  else f"== {host} == ({len(hpool)} cred(s))")
 
             raw_dir = os.path.join(out_dir, "raw", host.replace(":", "_"))
+
+            # these quick prechecks are only probed if a collector needs them
             ldap_ok: Optional[bool] = None
             admin_ok: Optional[bool] = None
+            mssql_ok: Optional[bool] = None
 
             for Col in collectors:
                 missing = [t for t in Col.requires if not find_tool(t)]
@@ -82,16 +99,24 @@ def run_all(targets: List[str], pool: CredentialPool,
                         line(f"   {Col.name:<12} skipped (no LDAP - not a DC)")
                         continue
 
-                if Col.needs_admin_dc:
+                if Col.needs_admin or Col.needs_admin_dc:
                     if admin_ok is None:
-                        active(f"{host}  checking admin/DCSync rights")
+                        active(f"{host}  checking local-admin rights")
                         admin_ok = any(smb_admin(host, c) for c in hpool)
                     if not admin_ok:
-                        line(f"   {Col.name:<12} skipped (no admin/DCSync on target)")
+                        line(f"   {Col.name:<12} skipped (no local-admin on target)")
+                        continue
+
+                if Col.needs_mssql:
+                    if mssql_ok is None:
+                        active(f"{host}  checking MSSQL")
+                        mssql_ok = mssql_reachable(host)
+                    if not mssql_ok:
+                        line(f"   {Col.name:<12} skipped (no MSSQL on target)")
                         continue
 
                 _wait_reachable(host, line, active)
-                active(f"{host}  looting  {Col.description or Col.name}")
+                active(f"{host}  looting  {Col.name}")
                 col = Col(host=host, raw_dir=raw_dir, timeout=timeout,
                           verbose=verbose, creds=list(hpool))
                 got: List[Secret] = []
