@@ -16,6 +16,7 @@ NXC_LINE = re.compile(r"^\s*\S+\s+\S+\s+\d+\s+\S+\s+(.*)$")
 
 class _NxcModule(BaseCollector):
     per_credential = False
+    needs_admin = True        # these read the target's registry/files (admin)
     requires = ("nxc",)
     module = ""
     source = ""
@@ -146,5 +147,6 @@ class WinscpCollector(_UserPassNxc):
 class MssqlCollector(_UserPassNxc):
     name = "MSSQL"; source = "MSSQL"; module = "mssql_priv"
     proto = "mssql"
+    needs_admin = False       # SQL login, not local admin
     needs_mssql = True        # auto-skip unless 1433 is open
     description = "MSSQL access / privilege + stored logins"
