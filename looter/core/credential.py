@@ -101,6 +101,11 @@ class Credential:
             args += ["-H", self.nthash]
         if self.local:
             args += ["--local-auth"]
+        elif self.domain:
+            # pass the domain so nxc does Windows auth (needed for MSSQL
+            # windows-auth and correct for SMB/LDAP too; without it nxc may
+            # fall back to local/SQL auth and fail for a domain account)
+            args += ["-d", self.domain]
         return args
 
 
