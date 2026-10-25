@@ -19,7 +19,10 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def strip_ansi(s: str) -> str:
-    return _ANSI_RE.sub("", s)
+    """Remove ANSI colour codes AND stray NUL bytes. dploot/nxc colour their
+    output (breaks line parsing), and some modules leak UTF-16LE text as bytes,
+    which shows up as a NUL between every character (breaks the JSON export)."""
+    return _ANSI_RE.sub("", s).replace("\x00", "")
 
 
 def tcp_open(host: str, port: int, timeout: float = 2.0) -> bool:
