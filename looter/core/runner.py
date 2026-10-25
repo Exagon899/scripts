@@ -1,12 +1,9 @@
 """Orchestrator: targets x collectors x credential-pool (scoped per host).
 
-Progress: every finished collector prints its own line that STAYS on screen; the
-currently-running collector is shown on a live spinner line (a spinning pipe)
-right below. Use -v for the detailed per-credential log instead.
-
-A pre-flight SMB auth check runs first and warns loudly if none of the supplied
-creds log on to any reachable target. Each collector also has a max_timeout cap
-so a hanging CLI can't block the whole run for the full global timeout.
+A pre-flight (core.authcheck) validates every cred against each open service and
+resolves the working auth mode; the matrix it returns gates and drives everything
+below, so each collector runs only with creds that actually authenticate against
+the service it uses - and with the right mode (domain / local / SQL / machine).
 
 per_credential == False  (SAM/LSA, nxc, AD): try creds until one works, then stop.
 per_credential == True   (DPAPI/dploot): try ALL creds (each may decrypt a
@@ -19,41 +16,16 @@ import sys
 import time
 from typing import List, Optional, Type
 
+from . import authcheck
+from .authcheck import SMB, MSSQL, LDAP
 from .credential import CredentialPool
 from .secret import Secret
-from .tools import (find_tool, ldap_reachable, tcp_open, smb_admin,
-                    smb_auth, mssql_reachable)
+from .tools import find_tool, tcp_open
 from collectors.base import BaseCollector
 
 
 def _log(msg: str) -> None:
     print(f"[*] {msg}", file=sys.stderr)
-
-
-def _preflight_auth(targets: List[str], pool: CredentialPool, line, active) -> bool:
-    """Check that the supplied creds authenticate against at least one reachable
-    target over SMB. Returns True if any (host, cred) pair logs on. Prints a
-    clear warning when nothing authenticates, so an empty result is not mistaken
-    for 'valid creds but no secrets'."""
-    any_auth = False
-    checked = False
-    for host in targets:
-        if not tcp_open(host, 445, 3):
-            continue
-        for cred in pool.for_host(host):
-            checked = True
-            active(f"{host}  verifying {cred.username}")
-            if smb_auth(host, cred):
-                any_auth = True
-                break
-        if any_auth:
-            break
-    if checked and not any_auth:
-        line("[bold red]!! none of the supplied credentials authenticated against "
-             "any reachable target (SMB 445)[/bold red]")
-        line("[red]   check username / domain / password-or-hash - results below "
-             "will be empty for anything that needs valid creds[/red]")
-    return any_auth
 
 
 def _wait_reachable(host: str, line, active) -> None:
@@ -99,19 +71,14 @@ def run_all(targets: List[str], pool: CredentialPool,
             status.update(f"[bold green]{msg}")
 
     try:
-        _preflight_auth(targets, pool, line, active)
+        # Pre-flight: validate creds against each service and resolve the auth
+        # mode that works. Everything below is gated/driven by this matrix.
+        matrix = authcheck.build(targets, pool, line, active)
 
         for host in targets:
-            hpool = pool.for_host(host)
-            line(f"[bold]== {host} ==[/bold]  ({len(hpool)} cred(s))" if console
-                 else f"== {host} == ({len(hpool)} cred(s))")
+            line(f"[bold]== {host} ==[/bold]" if console else f"== {host} ==")
 
             raw_dir = os.path.join(out_dir, "raw", host.replace(":", "_"))
-
-            # these quick prechecks are only probed if a collector needs them
-            ldap_ok: Optional[bool] = None
-            admin_ok: Optional[bool] = None
-            mssql_ok: Optional[bool] = None
 
             for Col in collectors:
                 missing = [t for t in Col.requires if not find_tool(t)]
@@ -119,44 +86,45 @@ def run_all(targets: List[str], pool: CredentialPool,
                     line(f"   {Col.name:<12} skipped (missing {','.join(missing)})")
                     continue
 
-                if Col.needs_ldap:
-                    if ldap_ok is None:
-                        active(f"{host}  checking LDAP")
-                        ldap_ok = ldap_reachable(host)
-                    if not ldap_ok:
-                        line(f"   {Col.name:<12} skipped (no LDAP - not a DC)")
-                        continue
+                svc = Col.auth_service
 
+                # DC / service-port gates
+                if Col.needs_ldap and not matrix.port_open(host, LDAP):
+                    line(f"   {Col.name:<12} skipped (no LDAP - not a DC)")
+                    continue
+                if Col.needs_mssql and not matrix.port_open(host, MSSQL):
+                    line(f"   {Col.name:<12} skipped (no MSSQL on target)")
+                    continue
+                if not matrix.port_open(host, svc):
+                    line(f"   {Col.name:<12} skipped (no {svc.upper()} on target)")
+                    continue
+
+                # pick the validated creds (right auth mode) for this collector
                 if Col.needs_admin or Col.needs_admin_dc:
-                    if admin_ok is None:
-                        active(f"{host}  checking local-admin rights")
-                        admin_ok = any(smb_admin(host, c) for c in hpool)
-                    if not admin_ok:
+                    use_creds = matrix.admin_creds(host)
+                    if not use_creds:
                         line(f"   {Col.name:<12} skipped (no local-admin on target)")
                         continue
-
-                if Col.needs_mssql:
-                    if mssql_ok is None:
-                        active(f"{host}  checking MSSQL")
-                        mssql_ok = mssql_reachable(host)
-                    if not mssql_ok:
-                        line(f"   {Col.name:<12} skipped (no MSSQL on target)")
+                else:
+                    use_creds = matrix.creds(host, svc)
+                    if not use_creds:
+                        line(f"   {Col.name:<12} skipped (no valid {svc.upper()} auth)")
                         continue
 
                 _wait_reachable(host, line, active)
                 active(f"{host}  looting  {Col.name}")
                 eff_timeout = min(timeout, Col.max_timeout) if Col.max_timeout else timeout
                 col = Col(host=host, raw_dir=raw_dir, timeout=eff_timeout,
-                          verbose=verbose, creds=list(hpool))
+                          verbose=verbose, creds=list(use_creds))
                 got: List[Secret] = []
 
                 if Col.per_credential:
-                    for cred in hpool:
+                    for cred in use_creds:
                         if verbose:
                             _log(f"{host} {Col.name} <- {cred.label}")
                         got += col.collect_with_cred(cred)
                 else:
-                    for cred in hpool:
+                    for cred in use_creds:
                         if verbose:
                             _log(f"{host} {Col.name} <- {cred.label}")
                         part = col.collect_once(cred)
