@@ -14,7 +14,8 @@ class BaseCollector:
     per_credential: bool = False
     requires = ("secretsdump",)
     needs_ldap: bool = False       # True = only runs if target serves LDAP (a DC)
-    needs_admin_dc: bool = False   # True = only runs if a cred is admin on target
+    needs_admin: bool = False      # True = only runs if a cred is local admin
+    needs_admin_dc: bool = False   # True = admin AND a DC (NTDS/VSS/backupkey)
     needs_mssql: bool = False      # True = only runs if target has MSSQL (1433)
 
     def __init__(self, host: str, raw_dir: str, timeout: int = 300,
