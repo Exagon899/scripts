@@ -51,8 +51,8 @@ class _DplootModule(BaseCollector):
     def _pool_files(self) -> List[str]:
         self._tmp = []
         args: List[str] = []
-        pws = [f"{c.username}:{c.password}" for c in self.creds if c.password is not None]
-        nts = [f"{c.username}:{c.nthash}" for c in self.creds if c.nthash]
+        pws = [f"{c.username}:{c.password}" for c in self.pool_creds if c.password is not None]
+        nts = [f"{c.username}:{c.nthash}" for c in self.pool_creds if c.nthash]
         for flag, lines in (("--passwords", pws), ("--nthashes", nts)):
             if not lines:
                 continue
