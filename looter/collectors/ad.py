@@ -21,6 +21,7 @@ class _AdNxc(BaseCollector):
     per_credential = False
     requires = ("nxc",)
     needs_ldap = True            # AD loot only makes sense against a DC
+    auth_service = "ldap"
     max_timeout = 120            # roasting can be slower; still cap it
     proto = "ldap"
     extra: List[str] = []
@@ -140,6 +141,7 @@ class DescriptionsCollector(_AdNxc):
 
 class GppCollector(_AdNxc):
     name = "GPP"; proto = "smb"; extra = ["-M", "gpp_password"]
+    auth_service = "smb"
     needs_ldap = True
     description = "SYSVOL GPP cpassword (Groups.xml etc.)"
 
