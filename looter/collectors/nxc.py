@@ -148,6 +148,7 @@ class WinscpCollector(_UserPassNxc):
 class MssqlCollector(_UserPassNxc):
     name = "MSSQL"; source = "MSSQL"; module = "mssql_priv"
     proto = "mssql"
+    auth_service = "mssql"    # validated via MSSQL in the pre-flight
     needs_admin = False       # SQL login, not local admin
     needs_mssql = True        # auto-skip unless 1433 is open
     description = "MSSQL access / privilege + stored logins"
