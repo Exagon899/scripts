@@ -13,6 +13,8 @@ class BaseCollector:
     description: str = ""
     per_credential: bool = False
     requires = ("secretsdump",)
+    auth_service: str = "smb"      # which service's validated creds to use:
+                                   # "smb" | "mssql" | "ldap" (see core.authcheck)
     needs_ldap: bool = False       # True = only runs if target serves LDAP (a DC)
     needs_admin: bool = False      # True = only runs if a cred is local admin
     needs_admin_dc: bool = False   # True = admin AND a DC (NTDS/VSS/backupkey)
