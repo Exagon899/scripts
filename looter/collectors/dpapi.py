@@ -1,8 +1,10 @@
 """DPAPI-protected loot via the dploot CLI (v4): browser passwords/cookies,
-Credential Manager, Vaults, certificates, RDCMan, WiFi, WAM, MobaXterm, SCCM NAA,
-plus MACHINE DPAPI. dploot reads blobs over the C$ admin share, so we auth as an
-admin cred and feed the WHOLE pool via --passwords/--nthashes so other users'
-masterkeys get decrypted too. Modules without --passwords set user_level=False."""
+Credential Manager, Vaults, certificates, RDCMan (.rdg), WiFi, WAM token broker,
+MobaXterm, plus the MACHINE DPAPI stores (need admin on the target).
+
+dploot reads blobs over the C$ admin share, so we auth as an admin cred and feed
+the WHOLE pool via --passwords/--nthashes so other users' masterkeys decrypt too.
+Modules without --passwords set user_level=False. Raw output always saved."""
 from __future__ import annotations
 
 import os
@@ -39,11 +41,12 @@ def _flush(host, source, buf) -> List[Secret]:
 
 class _DplootModule(BaseCollector):
     per_credential = True
+    needs_admin = True                 # dploot reads blobs over the C$ admin share
     requires = ("dploot",)
     module = ""
     source = ""
     module_extra: List[str] = []
-    user_level = True          # modules without --passwords set this False
+    user_level = True                  # machine modules set this False
 
     def _pool_files(self) -> List[str]:
         self._tmp = []
@@ -177,6 +180,8 @@ class CertificatesCollector(_DplootModule):
                                           if clientauth else "certificate + key"))
         return self._dedup(found)
 
+
+# ---- MACHINE DPAPI (needs admin; dploot machine* subcommands) ----
 
 class MachineCredsCollector(_DplootModule):
     name = "MachineCred"; source = "MachineCred"; module = "machinecredentials"
