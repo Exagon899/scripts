@@ -1,10 +1,15 @@
 """Phase 3 - file hunting over SMB (needs admin on the target for C$).
 
-Walks a few high-value locations and flags files that commonly hold credentials:
-unattend/sysprep, web.config and app configs, scripts, KeePass/SSH/cloud/git
-creds, GPP Groups.xml (cpassword auto-decrypt + FileZilla base64), SYSVOL logon
-scripts, memory dumps, PS transcripts, Jenkins/WSUS. Registry hives are NOT hunted
-(secretsdump already pulls those hashes). Self-contained via impacket."""
+Walks a few high-value locations on the target's shares and flags files that
+commonly hold credentials: unattend/sysprep, web.config and app configs, scripts,
+KeePass DBs, SSH/cloud/git creds, GPP Groups.xml (with cpassword auto-decrypt),
+SYSVOL logon scripts. Small text files are grepped for credential keywords; the
+hit (and the file path) is reported so you can pull the full file.
+
+Self-contained via impacket's SMBConnection. Fails gracefully (returns nothing)
+if login fails or impacket is missing. Everything found is also summarised to the
+raw output directory.
+"""
 from __future__ import annotations
 
 import base64
@@ -17,8 +22,8 @@ from core.credential import Credential
 from core.secret import Secret, Status
 from .base import BaseCollector
 
-MAX_FILE = 128 * 1024
-MAX_HITS = 400
+MAX_FILE = 128 * 1024          # only read files up to 128 KB
+MAX_HITS = 400                 # safety cap on total files inspected
 
 INTERESTING = re.compile(
     r"(unattend\.xml|autounattend\.xml|sysprep\.(inf|xml)|web\.config|"
@@ -55,6 +60,9 @@ ROOTS: List[Tuple[str, str, int]] = [
     ("C$", "ProgramData\\Jenkins", 3),
     ("C$", "Program Files\\Update Services", 2),        # WSUS config
     ("C$", "Transcripts", 2),
+    # locally cached GPP (survives after the GPO is deleted from SYSVOL) - holds
+    # Groups.xml with cpassword; _scan auto-decrypts it like the SYSVOL copy
+    ("C$", "ProgramData\\Microsoft\\Group Policy\\History", 6),
     ("SYSVOL", "", 5),
 ]
 
