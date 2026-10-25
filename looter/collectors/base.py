@@ -17,6 +17,9 @@ class BaseCollector:
     needs_admin: bool = False      # True = only runs if a cred is local admin
     needs_admin_dc: bool = False   # True = admin AND a DC (NTDS/VSS/backupkey)
     needs_mssql: bool = False      # True = only runs if target has MSSQL (1433)
+    max_timeout = None             # per-collector cap (s); None = use the global
+                                   # timeout. Keeps a hanging CLI from blocking
+                                   # the whole run for the full global timeout.
 
     def __init__(self, host: str, raw_dir: str, timeout: int = 300,
                  verbose: bool = False, creds=None):
@@ -34,6 +37,7 @@ class BaseCollector:
 
     def _raw_name(self, cred: Credential, suffix: str = "") -> str:
         who = (cred.username or "anon").replace("\\", "_").replace("/", "_")
+        # sanitise the collector name too - "SAM/LSA" must not create a subdir
         safe = self.name.replace("/", "_").replace("\\", "_").replace(" ", "_")
         s = f"_{suffix}" if suffix else ""
         return f"{safe}_{who}{s}.txt"
