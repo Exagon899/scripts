@@ -4,13 +4,9 @@ Progress: every finished collector prints its own line that STAYS on screen; the
 currently-running collector is shown on a live spinner line (a spinning pipe)
 right below. Use -v for the detailed per-credential log instead.
 
-A pre-flight SMB auth check runs first: if none of the supplied creds log on to
-any reachable target, a loud warning is printed so empty results are not
-mistaken for "valid creds, no secrets".
-
-Gating (per host, only if a collector needs it): LDAP reachable (=DC) for AD
-collectors; a cred being local-admin for everything that reads SAM/registry/C$;
-MSSQL (1433) for the MSSQL collector.
+A pre-flight SMB auth check runs first and warns loudly if none of the supplied
+creds log on to any reachable target. Each collector also has a max_timeout cap
+so a hanging CLI can't block the whole run for the full global timeout.
 
 per_credential == False  (SAM/LSA, nxc, AD): try creds until one works, then stop.
 per_credential == True   (DPAPI/dploot): try ALL creds (each may decrypt a
@@ -149,7 +145,8 @@ def run_all(targets: List[str], pool: CredentialPool,
 
                 _wait_reachable(host, line, active)
                 active(f"{host}  looting  {Col.name}")
-                col = Col(host=host, raw_dir=raw_dir, timeout=timeout,
+                eff_timeout = min(timeout, Col.max_timeout) if Col.max_timeout else timeout
+                col = Col(host=host, raw_dir=raw_dir, timeout=eff_timeout,
                           verbose=verbose, creds=list(hpool))
                 got: List[Secret] = []
 
