@@ -80,6 +80,7 @@ def run_all(targets: List[str], pool: CredentialPool,
             line(f"[bold]== {host} ==[/bold]" if console else f"== {host} ==")
 
             raw_dir = os.path.join(out_dir, "raw", host.replace(":", "_"))
+            host_pool = list(pool.for_host(host))        # full pool for DPAPI decrypt
 
             for Col in collectors:
                 missing = [t for t in Col.requires if not find_tool(t)]
