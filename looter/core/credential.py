@@ -1,13 +1,22 @@
-"""Credential pool. Feed every credential you own; each collector tries the pool.
+"""Credential pool. You feed the tool every credential you already own; each
+collector tries the whole pool so e.g. a browser blob owned by marcus gets
+decrypted with marcus' password automatically.
 
-Forms (--cred, repeatable, or one per line in --cred-file):
+Forms (CLI --cred, repeatable, or one per line in --cred-file):
+
     DOMAIN/user:Password123
     DOMAIN/user#aad3b...:<nthash>        (LM:NT)
     DOMAIN/user#<nthash>                 (NT only)
-    user:Password123
-    DOMAIN/user%ccache:/path/to.ccache
-Host scoping (bind a cred to ONE target, only tried there):
+    user:Password123                     (domain falls back to --domain / local)
+    DOMAIN/user%ccache:/path/to.ccache   (kerberos ticket)
+
+Host scoping (optional): prefix with 'HOST=' to bind a credential to ONE target
+so it is only tried there (useful when a local-admin hash is per-machine):
+
     192.168.1.10=DOMAIN/user:Password123
+    DC01=CORP/admin#<nthash>
+
+A credential without a HOST= prefix is tried against every target.
 """
 from __future__ import annotations
 
@@ -16,6 +25,8 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 EMPTY_LM = "aad3b435b51404eeaad3b435b51404ee"
+# a hostish token: letters/digits/dots/hyphens only (no / : # so we never eat a
+# password that happens to contain '=')
 _HOSTISH = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -28,7 +39,7 @@ class Credential:
     nthash: Optional[str] = None
     ccache: Optional[str] = None
     local: bool = False
-    host: Optional[str] = None
+    host: Optional[str] = None          # None = applies to all targets
 
     @property
     def label(self) -> str:
@@ -68,6 +79,7 @@ class Credential:
         return args
 
     def dploot_auth_args(self) -> List[str]:
+        # dploot v4: --hashes (not -H), target is passed by the collector via -t
         args: List[str] = []
         if self.domain:
             args += ["-d", self.domain]
@@ -75,7 +87,7 @@ class Credential:
             args += ["-p", self.password]
         if self.nthash:
             lm = self.lmhash or EMPTY_LM
-            args += ["-H", f"{lm}:{self.nthash}"]
+            args += ["--hashes", f"{lm}:{self.nthash}"]
         if self.ccache:
             args += ["-k"]
         args += ["-u", self.username]
@@ -95,6 +107,7 @@ class Credential:
 def parse_credential(raw: str, default_domain: str = "", local: bool = False) -> Credential:
     raw = raw.strip()
 
+    # optional HOST= scope: only if the part before the first '=' looks like a host
     host = None
     if "=" in raw:
         left, right = raw.split("=", 1)
