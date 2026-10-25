@@ -4,6 +4,8 @@ A pre-flight (core.authcheck) validates every cred against each open service and
 resolves the working auth mode; the matrix it returns gates and drives everything
 below, so each collector runs only with creds that actually authenticate against
 the service it uses - and with the right mode (domain / local / SQL / machine).
+The FULL supplied pool is also handed to each collector (pool_creds) so DPAPI
+collectors can decrypt other users' masterkeys even when auth is admin-only.
 
 per_credential == False  (SAM/LSA, nxc, AD): try creds until one works, then stop.
 per_credential == True   (DPAPI/dploot): try ALL creds (each may decrypt a
@@ -117,7 +119,7 @@ def run_all(targets: List[str], pool: CredentialPool,
                 active(f"{host}  looting  {Col.name}")
                 eff_timeout = min(timeout, Col.max_timeout) if Col.max_timeout else timeout
                 col = Col(host=host, raw_dir=raw_dir, timeout=eff_timeout,
-                          verbose=verbose, creds=list(use_creds))
+                          verbose=verbose, creds=list(use_creds), pool_creds=host_pool)
                 got: List[Secret] = []
 
                 if Col.per_credential:
