@@ -17,6 +17,7 @@ NXC_LINE = re.compile(r"^\s*\S+\s+\S+\s+\d+\s+\S+\s+(.*)$")
 class _NxcModule(BaseCollector):
     per_credential = False
     needs_admin = True        # these read the target's registry/files (admin)
+    max_timeout = 90          # nxc modules can hang; cap so one can't block long
     requires = ("nxc",)
     module = ""
     source = ""
