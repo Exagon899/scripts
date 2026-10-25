@@ -201,9 +201,34 @@ def build(targets: List[str], pool: CredentialPool, line, active) -> AuthMatrix:
     return matrix
 
 
+def access_findings(matrix: "AuthMatrix") -> list:
+    """Turn every validated (cred, service) pair into an 'Access' finding, so the
+    supplied creds that actually grant access show up in the loot table with the
+    mode/privilege they unlocked (e.g. smb local-admin, mssql sysadmin)."""
+    from .secret import Secret, Status
+    out = []
+    for host, svcmap in matrix.data.items():
+        for svc in (SMB, MSSQL, LDAP):
+            for ec, admin, mode in svcmap.get(svc, []):
+                if ec.password is not None:
+                    secret, status = ec.password, Status.CLEARTEXT
+                elif ec.nthash:
+                    secret, status = ec.nthash, Status.HASH
+                else:
+                    secret, status = "(ccache)", Status.INFO
+                tag = mode
+                if svc == SMB and admin:
+                    tag = f"{mode},ADMIN"
+                user = f"{ec.domain}\\{ec.username}" if ec.domain else ec.username
+                out.append(Secret(host, "Access", user, secret, status,
+                                  target=svc, secret_type="valid-login",
+                                  notes=f"supplied cred - valid {svc} login ({tag})"))
+    return out
+
+
 def _print_host(host, hpool, open_, res, line) -> None:
     line(f"[bold]== auth-check {host} ==[/bold]")
-
+    # index valid results by username for quick lookup
     def _entry(service, username):
         for ec, admin, mode in res[service]:
             if ec.username == username:
@@ -227,6 +252,6 @@ def _print_host(host, hpool, open_, res, line) -> None:
             parts.append(f"[green]{svc}:OK({tag})[/green]")
         line(f"   {cred.username:<18} " + "  ".join(parts))
 
-    if any(open_.values()) and not any(res[s] for s in (SMB, MSSQL, LDAP)):
+    if open_ and not any(res[s] for s in (SMB, MSSQL, LDAP)) and any(open_.values()):
         line(f"[bold red]   !! no credential authenticated against {host} "
              f"on any open service[/bold red]")
