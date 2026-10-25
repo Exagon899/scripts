@@ -46,7 +46,7 @@ def mssql_reachable(host: str, timeout: float = 2.0) -> bool:
     return tcp_open(host, 1433, timeout)
 
 
-def smb_auth(host, cred, timeout: int = 6) -> bool:
+def smb_auth(host, cred, timeout: int = 12) -> bool:
     """True if the credential simply authenticates over SMB (valid logon),
     regardless of privilege. Used for the pre-flight 'do these creds work at
     all?' check. Kerberos-ccache creds can't be verified this way, so we treat
@@ -67,7 +67,7 @@ def smb_auth(host, cred, timeout: int = 6) -> bool:
         return False
 
 
-def smb_admin(host, cred, timeout: int = 6) -> bool:
+def smb_admin(host, cred, timeout: int = 12) -> bool:
     """True if the credential is local admin on the host (can open the ADMIN$
     share). Used as a cheap proxy for 'can DCSync / dump NTDS' on a DC, so those
     collectors are skipped automatically when no credential is privileged."""
