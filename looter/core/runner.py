@@ -4,10 +4,13 @@ Progress: every finished collector prints its own line that STAYS on screen; the
 currently-running collector is shown on a live spinner line (a spinning pipe)
 right below. Use -v for the detailed per-credential log instead.
 
-Gating (checked once per host, only if a collector needs it): LDAP reachable
-(=DC) for AD collectors; a cred being local-admin for everything that reads the
-target's SAM/registry/C$; MSSQL (1433) open for the MSSQL collector. Anything
-whose precondition is not met is skipped instantly instead of hanging.
+A pre-flight SMB auth check runs first: if none of the supplied creds log on to
+any reachable target, a loud warning is printed so empty results are not
+mistaken for "valid creds, no secrets".
+
+Gating (per host, only if a collector needs it): LDAP reachable (=DC) for AD
+collectors; a cred being local-admin for everything that reads SAM/registry/C$;
+MSSQL (1433) for the MSSQL collector.
 
 per_credential == False  (SAM/LSA, nxc, AD): try creds until one works, then stop.
 per_credential == True   (DPAPI/dploot): try ALL creds (each may decrypt a
@@ -22,12 +25,39 @@ from typing import List, Optional, Type
 
 from .credential import CredentialPool
 from .secret import Secret
-from .tools import find_tool, ldap_reachable, tcp_open, smb_admin, mssql_reachable
+from .tools import (find_tool, ldap_reachable, tcp_open, smb_admin,
+                    smb_auth, mssql_reachable)
 from collectors.base import BaseCollector
 
 
 def _log(msg: str) -> None:
     print(f"[*] {msg}", file=sys.stderr)
+
+
+def _preflight_auth(targets: List[str], pool: CredentialPool, line, active) -> bool:
+    """Check that the supplied creds authenticate against at least one reachable
+    target over SMB. Returns True if any (host, cred) pair logs on. Prints a
+    clear warning when nothing authenticates, so an empty result is not mistaken
+    for 'valid creds but no secrets'."""
+    any_auth = False
+    checked = False
+    for host in targets:
+        if not tcp_open(host, 445, 3):
+            continue
+        for cred in pool.for_host(host):
+            checked = True
+            active(f"{host}  verifying {cred.username}")
+            if smb_auth(host, cred):
+                any_auth = True
+                break
+        if any_auth:
+            break
+    if checked and not any_auth:
+        line("[bold red]!! none of the supplied credentials authenticated against "
+             "any reachable target (SMB 445)[/bold red]")
+        line("[red]   check username / domain / password-or-hash - results below "
+             "will be empty for anything that needs valid creds[/red]")
+    return any_auth
 
 
 def _wait_reachable(host: str, line, active) -> None:
@@ -73,6 +103,8 @@ def run_all(targets: List[str], pool: CredentialPool,
             status.update(f"[bold green]{msg}")
 
     try:
+        _preflight_auth(targets, pool, line, active)
+
         for host in targets:
             hpool = pool.for_host(host)
             line(f"[bold]== {host} ==[/bold]  ({len(hpool)} cred(s))" if console
