@@ -74,6 +74,7 @@ def run_all(targets: List[str], pool: CredentialPool,
         # Pre-flight: validate creds against each service and resolve the auth
         # mode that works. Everything below is gated/driven by this matrix.
         matrix = authcheck.build(targets, pool, line, active)
+        _merge(results, authcheck.access_findings(matrix))   # supplied creds that work
 
         for host in targets:
             line(f"[bold]== {host} ==[/bold]" if console else f"== {host} ==")
