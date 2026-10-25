@@ -16,9 +16,12 @@ NXC_LINE = re.compile(r"^\s*\S+\s+\S+\s+\d+\s+\S+\s+(.*)$")
 
 
 class _AdNxc(BaseCollector):
+    """Flexible nxc runner: choose proto (ldap/smb) and extra args (a '-M module'
+    or a built-in flag like --kerberoasting)."""
     per_credential = False
     requires = ("nxc",)
     needs_ldap = True            # AD loot only makes sense against a DC
+    max_timeout = 120            # roasting can be slower; still cap it
     proto = "ldap"
     extra: List[str] = []
     kdc = False                  # True = pin the KDC to the target (roasting)
