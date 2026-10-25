@@ -1,11 +1,13 @@
 """Orchestrator: targets x collectors x credential-pool (scoped per host).
 
 A pre-flight (core.authcheck) validates every cred against each open service and
-resolves the working auth mode; the matrix it returns gates and drives everything
-below, so each collector runs only with creds that actually authenticate against
-the service it uses - and with the right mode (domain / local / SQL / machine).
-The FULL supplied pool is also handed to each collector (pool_creds) so DPAPI
-collectors can decrypt other users' masterkeys even when auth is admin-only.
+resolves the working auth mode. That matrix is used ONLY to (a) skip what is 100%
+impossible - a closed port, not a DC, no local-admin for an admin-only collector -
+and (b) hint the right auth mode. It NEVER pre-filters which creds a collector may
+try: a finding must never be lost because the auth-check guessed wrong, so each
+collector is handed every relevant cred (validated-first) and is the final judge.
+The full supplied pool is also handed over (pool_creds) so DPAPI collectors can
+decrypt other users' masterkeys even when auth is admin-only.
 
 per_credential == False  (SAM/LSA, nxc, AD): try creds until one works, then stop.
 per_credential == True   (DPAPI/dploot): try ALL creds (each may decrypt a
@@ -74,7 +76,7 @@ def run_all(targets: List[str], pool: CredentialPool,
 
     try:
         # Pre-flight: validate creds against each service and resolve the auth
-        # mode that works. Everything below is gated/driven by this matrix.
+        # mode that works. Used only for gating + mode hints, never to drop creds.
         matrix = authcheck.build(targets, pool, line, active)
         _merge(results, authcheck.access_findings(matrix))   # supplied creds that work
 
@@ -92,7 +94,7 @@ def run_all(targets: List[str], pool: CredentialPool,
 
                 svc = Col.auth_service
 
-                # DC / service-port gates
+                # DC / service-port gates (the only "100% impossible" skips)
                 if Col.needs_ldap and not matrix.port_open(host, LDAP):
                     line(f"   {Col.name:<12} skipped (no LDAP - not a DC)")
                     continue
@@ -103,16 +105,21 @@ def run_all(targets: List[str], pool: CredentialPool,
                     line(f"   {Col.name:<12} skipped (no {svc.upper()} on target)")
                     continue
 
-                # pick the validated creds (right auth mode) for this collector
+                # pick the creds to run with. RULE: never drop a finding because
+                # of the auth-check - only skip when it is 100% impossible.
                 if Col.needs_admin or Col.needs_admin_dc:
-                    use_creds = matrix.admin_creds(host)
-                    if not use_creds:
+                    # needs local-admin: skip ONLY if no supplied cred is admin
+                    if not matrix.has_admin(host):
                         line(f"   {Col.name:<12} skipped (no local-admin on target)")
                         continue
+                    use_creds = matrix.admin_creds(host)
                 else:
-                    use_creds = matrix.creds(host, svc)
+                    # non-admin service (smb/ldap/mssql): the port is open, so RUN
+                    # with every supplied cred (validated-first, right mode), and
+                    # let the collector be the final judge. Never pre-filter here.
+                    use_creds = matrix.service_creds(host, svc, host_pool)
                     if not use_creds:
-                        line(f"   {Col.name:<12} skipped (no valid {svc.upper()} auth)")
+                        line(f"   {Col.name:<12} skipped (no credentials supplied)")
                         continue
 
                 _wait_reachable(host, line, active)
