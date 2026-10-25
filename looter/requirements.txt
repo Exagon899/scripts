@@ -1,5 +1,12 @@
+# CredHunter runtime dependencies (the tool itself is pure-python; these are the
+# engines it orchestrates + the pretty output lib).
+#
+# NetExec (nxc) is NOT pip-installable from PyPI - CredHunter calls it as a CLI,
+# not as a library, so it is not listed here. If `nxc` is missing, install it
+# separately (pre-installed on HTB PwnBox / Kali), e.g.:
+#     pipx install git+https://github.com/Pennyw0rth/NetExec
 rich>=13.0.0
 impacket>=0.11.0
 dploot>=4.0.0
-netexec>=1.1.0
+# used for LSASS parsing / offline DPAPI:
 pypykatz>=0.6.0
