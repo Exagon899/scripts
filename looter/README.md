@@ -1,4 +1,4 @@
-# moorloot
+# credhunter
 Domain-joined Windows credential looter (MVP). Orchestrates impacket/dploot/nxc,
 tries a credential pool against each host, auto-decrypts browser/DPAPI secrets,
 one unified table.
