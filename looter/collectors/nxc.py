@@ -11,6 +11,7 @@ from core.secret import Secret, Status
 from core.tools import find_tool, run, strip_ansi
 from .base import BaseCollector
 
+# nxc prints "MODULE  host  port  NAME  <message>"
 NXC_LINE = re.compile(r"^\s*\S+\s+\S+\s+\d+\s+\S+\s+(.*)$")
 
 
@@ -40,7 +41,7 @@ class _NxcModule(BaseCollector):
                 msgs.append(m.group(1).strip())
         return msgs
 
-    def _parse(self, out: str) -> List[Secret]:
+    def _parse(self, out: str) -> List[Secret]:  # overridden
         return []
 
 
@@ -79,6 +80,7 @@ class LsassCollector(_NxcModule):
     name = "LSASS"; source = "LSASS"; module = "lsassy"
     description = "Live LSASS dump (logged-on users' hashes/cleartext)"
 
+    # lsassy prints "DOMAIN\user <nthash>" or "DOMAIN\user <cleartext>"
     LINE = re.compile(r"^([^\s\\/]+[\\/][^\s]+)\s+([0-9a-fA-F]{32}|\S+)$")
 
     def _parse(self, out: str) -> List[Secret]:
@@ -152,3 +154,17 @@ class MssqlCollector(_UserPassNxc):
     needs_admin = False       # SQL login, not local admin
     needs_mssql = True        # auto-skip unless 1433 is open
     description = "MSSQL access / privilege + stored logins"
+
+    def _parse(self, out: str) -> List[Secret]:
+        found = super()._parse(out)          # any user:pass pairs the module prints
+        for msg in self._messages(out):
+            low = msg.lower()
+            if "sysadmin" in low:
+                found.append(Secret(self.host, "MSSQL", "", msg[:140], Status.INFO,
+                                    secret_type="mssql-priv",
+                                    notes="MSSQL sysadmin -> enable xp_cmdshell for RCE"))
+            elif "can be made" in low or "grant" in low or "impersonate" in low:
+                found.append(Secret(self.host, "MSSQL", "", msg[:140], Status.INFO,
+                                    secret_type="mssql-priv",
+                                    notes="MSSQL privilege path - review raw file"))
+        return found
