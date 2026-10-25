@@ -52,9 +52,14 @@ class SamLsaCollector(BaseCollector):
                 section = "dcc2"; continue
             if "dumping lsa secrets" in low:
                 section = "lsa"; continue
+            # on a DC, plain secretsdump ALSO dumps NTDS via DRSUAPI in the same
+            # user:rid:lm:nt::: format - mark that section so we don't mislabel
+            # those domain hashes as local SAM (the NTDS collector reports them)
+            if "dumping domain credentials" in low or "drsuapi" in low:
+                section = "ntds"; continue
 
             m = SAM_RE.match(line)
-            if m:
+            if m and section == "sam":
                 user, _rid, _lm, nt = m.groups()
                 found.append(Secret(self.host, "SAM", user, nt, Status.HASH,
                                     secret_type="nthash",
