@@ -24,12 +24,16 @@ class BaseCollector:
                                    # the whole run for the full global timeout.
 
     def __init__(self, host: str, raw_dir: str, timeout: int = 300,
-                 verbose: bool = False, creds=None):
+                 verbose: bool = False, creds=None, pool_creds=None):
         self.host = host
         self.raw_dir = raw_dir
         self.timeout = timeout
         self.verbose = verbose
-        self.creds = list(creds) if creds else []   # whole host cred pool
+        self.creds = list(creds) if creds else []   # creds this collector runs with
+        # the FULL supplied pool for this host (every cred, admin or not) - used to
+        # build the DPAPI --passwords/--nthashes list so an admin login can decrypt
+        # OTHER users' masterkeys too. Falls back to self.creds if not given.
+        self.pool_creds = list(pool_creds) if pool_creds else list(self.creds)
 
     def collect_once(self, cred: Credential) -> List[Secret]:
         return []
