@@ -26,6 +26,7 @@ def strip_ansi(s: str) -> str:
 
 
 def tcp_open(host: str, port: int, timeout: float = 2.0) -> bool:
+    """Quick TCP connect check."""
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
@@ -34,14 +35,42 @@ def tcp_open(host: str, port: int, timeout: float = 2.0) -> bool:
 
 
 def ldap_reachable(host: str, timeout: float = 2.0) -> bool:
+    """True if LDAP (389) or LDAPS (636) answers - i.e. the target is a DC.
+    Used to skip AD collectors against non-DC hosts instead of hanging on them."""
     return tcp_open(host, 389, timeout) or tcp_open(host, 636, timeout)
 
 
 def mssql_reachable(host: str, timeout: float = 2.0) -> bool:
+    """True if MSSQL (1433) answers - used to skip the MSSQL collector (and not
+    hang) on hosts without a SQL server."""
     return tcp_open(host, 1433, timeout)
 
 
+def smb_auth(host, cred, timeout: int = 6) -> bool:
+    """True if the credential simply authenticates over SMB (valid logon),
+    regardless of privilege. Used for the pre-flight 'do these creds work at
+    all?' check. Kerberos-ccache creds can't be verified this way, so we treat
+    them as authenticating (return True) rather than flag a false negative."""
+    if cred.ccache:
+        return True
+    try:
+        from impacket.smbconnection import SMBConnection
+    except ImportError:
+        return True        # cannot check -> assume ok
+    try:
+        c = SMBConnection(host, host, timeout=timeout)
+        c.login(cred.username, cred.password or "", cred.domain,
+                cred.lmhash or "", cred.nthash or "")
+        c.logoff()
+        return True
+    except Exception:
+        return False
+
+
 def smb_admin(host, cred, timeout: int = 6) -> bool:
+    """True if the credential is local admin on the host (can open the ADMIN$
+    share). Used as a cheap proxy for 'can DCSync / dump NTDS' on a DC, so those
+    collectors are skipped automatically when no credential is privileged."""
     try:
         from impacket.smbconnection import SMBConnection
     except ImportError:
@@ -56,7 +85,7 @@ def smb_admin(host, cred, timeout: int = 6) -> bool:
     except Exception:
         return False
 
-
+# candidate binary names per logical tool (first found wins)
 TOOL_CANDIDATES = {
     "secretsdump": ["impacket-secretsdump", "secretsdump.py", "secretsdump"],
     "dploot": ["dploot"],
@@ -91,6 +120,7 @@ class CmdResult:
 
 def run(cmd: List[str], timeout: int = 300, raw_dir: Optional[str] = None,
         raw_name: Optional[str] = None) -> CmdResult:
+    """Run a command, capture output, optionally persist raw output to disk."""
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
