@@ -7,6 +7,9 @@ account). It then prints a matrix so you see at a glance what is valid where, an
 hands the runner "effective credentials" already tuned to the mode that worked -
 so collectors never fail silently on the wrong auth mode.
 
+The matrix is used ONLY for gating (skip the 100%-impossible) and mode hints - it
+NEVER drops a cred a collector could try (see AuthMatrix.service_creds).
+
 Why this matters: a credential can be
   - a domain account         -> SMB/LDAP/MSSQL with -d DOMAIN
   - a local SAM admin        -> SMB with --local-auth
@@ -165,6 +168,25 @@ class AuthMatrix:
 
     def admin_creds(self, host: str) -> List[Credential]:
         return [ec for ec, a, _m in self.data.get(host, {}).get(SMB, []) if a]
+
+    def has_admin(self, host: str) -> bool:
+        return bool(self.admin_creds(host))
+
+    def service_creds(self, host: str, service: str, full_pool) -> List[Credential]:
+        """Creds to try for a NON-admin service collector. Never drops a cred:
+        returns the pre-flight-validated creds first (already tuned to the mode
+        that worked), then EVERY other supplied cred in its original form so the
+        collector still tries it even if the pre-flight probe missed it. A finding
+        must never be lost because the auth-check was wrong - the collector itself
+        is the final judge."""
+        validated = self.data.get(host, {}).get(service, [])
+        ordered = [ec for ec, _a, _m in validated]
+        seen = {ec.username for ec in ordered}
+        for c in full_pool:
+            if c.username not in seen:
+                ordered.append(c)
+                seen.add(c.username)
+        return ordered
 
     def any_valid(self, host: str) -> bool:
         return any(self.data.get(host, {}).get(s) for s in (SMB, MSSQL, LDAP))
