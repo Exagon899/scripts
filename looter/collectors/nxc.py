@@ -102,6 +102,58 @@ class LsassCollector(_NxcModule):
         return found
 
 
+class FirefoxCollector(_NxcModule):
+    name = "Firefox"; source = "Firefox"; module = "firefox"
+    description = "Firefox saved logins (NSS logins.json/key4.db, decrypted; needs admin)"
+
+    # The module prints URL / username / password, sometimes on one line,
+    # sometimes across lines. URL and username rarely contain spaces; the
+    # password is taken as the rest of the line so spaces are kept.
+    URL = re.compile(r"(?:url|site|host|origin)\s*[:=]\s*(\S+)", re.I)
+    USER = re.compile(r"(?:user(?:name)?|login)\s*[:=]\s*(\S+)", re.I)
+    PWD = re.compile(r"(?:password|passwd|pwd)\s*[:=]\s*(.+?)\s*$", re.I)
+
+    def _parse(self, out: str) -> List[Secret]:
+        found = []
+        url = user = None
+        for msg in self._messages(out):
+            mu = self.URL.search(msg)
+            if mu:
+                url = mu.group(1)
+            uu = self.USER.search(msg)
+            pp = self.PWD.search(msg)
+            if uu and pp:
+                found.append(Secret(self.host, "Firefox", uu.group(1), pp.group(1),
+                                    Status.DECRYPTED, target=url or "",
+                                    secret_type="password", notes="Firefox saved login"))
+                url = user = None
+                continue
+            if uu:
+                user = uu.group(1)
+            if pp and user is not None:
+                found.append(Secret(self.host, "Firefox", user, pp.group(1),
+                                    Status.DECRYPTED, target=url or "",
+                                    secret_type="password", notes="Firefox saved login"))
+                url = user = None
+        return found
+
+
+class TeamsCollector(_NxcModule):
+    name = "Teams"; source = "Teams"; module = "teams_localdb"
+    description = "Microsoft Teams auth cookies/tokens (session takeover; needs admin)"
+
+    def _parse(self, out: str) -> List[Secret]:
+        found = []
+        for msg in self._messages(out):
+            low = msg.lower()
+            if any(k in low for k in ("token", "cookie", "skypetoken",
+                                      "authtoken", "bearer")):
+                found.append(Secret(self.host, "Teams", "", msg[:160], Status.INFO,
+                                    secret_type="token",
+                                    notes="Teams session cookie/token - see raw file"))
+        return found
+
+
 class _UserPassNxc(_NxcModule):
     """Shared parser for modules that print a user + password pair somewhere."""
     def _parse(self, out: str) -> List[Secret]:
