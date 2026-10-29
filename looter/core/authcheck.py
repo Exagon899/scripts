@@ -35,6 +35,15 @@ _PROBE_TIMEOUT = 40          # per nxc probe attempt (s)
 _NAME_RE = re.compile(r"\(name:([^)]+)\)")
 
 
+def _cred_ident(c: Credential) -> Tuple[str, str, str, str]:
+    """Identity of the *secret material* behind a credential - username plus
+    whatever authenticator it carries. Two creds with the same username but a
+    different hash/password (e.g. a LOCAL john and a DOMAIN john) are DISTINCT and
+    must both be tested; only an exact material duplicate is collapsed."""
+    return (c.username.lower(), c.password or "",
+            (c.nthash or "").lower(), c.ccache or "")
+
+
 # ---- SMB (impacket, in-process) --------------------------------------------
 
 def _smb_login(host: str, v: Credential, timeout: int = 12) -> Tuple[Optional[bool], bool]:
@@ -178,14 +187,19 @@ class AuthMatrix:
         that worked), then EVERY other supplied cred in its original form so the
         collector still tries it even if the pre-flight probe missed it. A finding
         must never be lost because the auth-check was wrong - the collector itself
-        is the final judge."""
+        is the final judge.
+
+        Dedup is by secret MATERIAL (username + password/hash/ccache), NOT by
+        username alone: a local and a domain account that share a name but have
+        different hashes are different credentials and both get tested."""
         validated = self.data.get(host, {}).get(service, [])
         ordered = [ec for ec, _a, _m in validated]
-        seen = {ec.username for ec in ordered}
+        seen = {_cred_ident(ec) for ec in ordered}
         for c in full_pool:
-            if c.username not in seen:
+            k = _cred_ident(c)
+            if k not in seen:
                 ordered.append(c)
-                seen.add(c.username)
+                seen.add(k)
         return ordered
 
     def any_valid(self, host: str) -> bool:
