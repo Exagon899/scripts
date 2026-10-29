@@ -9,7 +9,7 @@ from .dpapi import (
 from .nxc import (
     VncCollector, PSHistoryCollector, AutologonCollector, EventlogCollector,
     VeeamCollector, LsassCollector, PuttyCollector, MremotengCollector,
-    WinscpCollector, MssqlCollector,
+    WinscpCollector, MssqlCollector, FirefoxCollector, TeamsCollector,
 )
 from .filehunt import FileHuntCollector
 from .ad import (
@@ -23,6 +23,8 @@ ALL_COLLECTORS = [
     SamLsaCollector,
     LsassCollector,
     BrowserCollector,
+    FirefoxCollector,
+    TeamsCollector,
     CredManCollector,
     VaultsCollector,
     RdgCollector,
