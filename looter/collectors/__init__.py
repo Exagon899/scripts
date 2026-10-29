@@ -2,9 +2,9 @@
 from .sam_lsa import SamLsaCollector
 from .dpapi import (
     BrowserCollector, CredManCollector, VaultsCollector, RdgCollector,
-    WifiCollector, CertificatesCollector, WamCollector, MobaXtermCollector,
-    SccmCollector, MachineCredsCollector, MachineVaultsCollector,
-    MachineCertsCollector,
+    WifiCollector, CertificatesCollector, CngCollector, WamCollector,
+    MobaXtermCollector, SccmCollector, MachineCredsCollector,
+    MachineVaultsCollector, MachineCertsCollector, MachineCngCollector,
 )
 from .nxc import (
     VncCollector, PSHistoryCollector, AutologonCollector, EventlogCollector,
@@ -27,6 +27,7 @@ ALL_COLLECTORS = [
     VaultsCollector,
     RdgCollector,
     CertificatesCollector,
+    CngCollector,
     WifiCollector,
     WamCollector,
     MobaXtermCollector,
@@ -43,6 +44,7 @@ ALL_COLLECTORS = [
     MachineCredsCollector,
     MachineVaultsCollector,
     MachineCertsCollector,
+    MachineCngCollector,
     FileHuntCollector,
     # --- Active Directory (target the DC) ---
     GppCollector,
