@@ -1,0 +1,10 @@
+# nixdump core is pure stdlib - this is only for prettier table output.
+# Everything works without it (plain-text fallback).
+rich>=13.0.0
+
+# Optional external CLIs used when present (install via your distro / pipx):
+#   john            - offline cracking (--crack)        : apt install john
+#   hashcat         - alternative cracker (manual)       : apt install hashcat
+#   ssh2john        - ships with john                    : (john-jumbo)
+#   keepass2john    - ships with john                    : (john-jumbo)
+#   firefox_decrypt - Firefox login decryption (--crack) : pipx install firefox-decrypt
