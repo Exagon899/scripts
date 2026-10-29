@@ -99,43 +99,62 @@ class GmsaCollector(_AdNxc):
 
 class LapsCollector(_AdNxc):
     name = "LAPS"; proto = "ldap"; extra = ["-M", "laps"]
-    description = "LAPS local-admin passwords (needs read rights)"
+    description = "LAPS local-admin passwords (legacy + Windows LAPS v2; needs read rights)"
+
+    # The nxc laps module reads legacy (ms-Mcs-AdmPwd) AND Windows LAPS v2
+    # (msLAPS-Password / msLAPS-EncryptedPassword), decrypting the encrypted v2
+    # value automatically when the bound account has the rights. Field labels and
+    # order differ between module versions and legacy vs v2, so we match loosely
+    # and take the password as the REST OF THE LINE (never cut on a space, so a
+    # password containing spaces is captured in full).
+    COMP = re.compile(r"(?:Computer|Host|Name|Account)\s*[:=]\s*(\S+)", re.I)
+    PWD = re.compile(r"(?:Password|pwd)\s*[:=]\s*(.+?)\s*$", re.I)
 
     def _parse(self, out: str) -> List[Secret]:
         found = []
         for msg in self._messages(out):
-            m = re.search(r"(?:Computer|Host|Name):\s*(\S+).*?(?:Password):\s*(\S+)", msg, re.I)
-            if m:
-                found.append(Secret(self.host, "LAPS", m.group(1), m.group(2),
-                                    Status.CLEARTEXT, secret_type="password",
-                                    target=m.group(1), notes="local admin pw"))
+            mp = self.PWD.search(msg)
+            if not mp:
+                continue
+            mc = self.COMP.search(msg)
+            comp = mc.group(1) if mc else ""
+            found.append(Secret(self.host, "LAPS", comp, mp.group(1),
+                                Status.CLEARTEXT, secret_type="password",
+                                target=comp, notes="local admin pw (LAPS)"))
         return found
 
 
 class DescriptionsCollector(_AdNxc):
     name = "ADDesc"; proto = "ldap"; extra = ["-M", "get-desc-users"]
-    description = "AD user description / password fields"
+    description = "AD user description fields (ALL non-empty, unfiltered)"
 
-    HINT = re.compile(r"(pass|pwd|passwort|cred|secret|login|pw\s*[:=]|"
-                      r"[:=]\s*\S*\d\S*[A-Za-z]|!|@)", re.I)
+    # Clean method: do NOT keyword-filter which descriptions to keep (that drops
+    # plaintext passwords that don't look password-ish). Report EVERY non-empty
+    # description so you can scan them yourself; only the known built-in-account
+    # boilerplate is dropped as noise. Creddy-looking ones get flagged in notes,
+    # but nothing is ever discarded on a heuristic.
     NOISE = re.compile(r"built-in account|key distribution|managed service|"
                        r"guest access", re.I)
+    HINT = re.compile(r"(pass|pwd|passwort|cred|secret|login|[:=]\s*\S*\d)", re.I)
 
     def _parse(self, out: str) -> List[Secret]:
         found = []
         for msg in self._messages(out):
             low = msg.lower()
-            if "description:" not in low or self.NOISE.search(msg):
+            if "description:" not in low:
                 continue
             desc = msg.split("description:", 1)[1].strip()
-            if desc and self.HINT.search(desc):
-                user = ""
-                mu = re.search(r"User:\s*(\S+)", msg)
-                if mu:
-                    user = mu.group(1)
-                found.append(Secret(self.host, "ADDesc", user, desc[:120], Status.INFO,
-                                    secret_type="description",
-                                    notes="description may hold a credential"))
+            if not desc or self.NOISE.search(msg):
+                continue
+            user = ""
+            mu = re.search(r"User:\s*(\S+)", msg)
+            if mu:
+                user = mu.group(1)
+            creddy = bool(self.HINT.search(desc))
+            found.append(Secret(self.host, "ADDesc", user, desc[:160], Status.INFO,
+                                secret_type="description",
+                                notes="possible credential in description" if creddy
+                                      else "description - review"))
         return found
 
 
