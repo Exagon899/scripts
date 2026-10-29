@@ -80,8 +80,11 @@ class LsassCollector(_NxcModule):
     name = "LSASS"; source = "LSASS"; module = "lsassy"
     description = "Live LSASS dump (logged-on users' hashes/cleartext)"
 
-    # lsassy prints "DOMAIN\user <nthash>" or "DOMAIN\user <cleartext>"
-    LINE = re.compile(r"^([^\s\\/]+[\\/][^\s]+)\s+([0-9a-fA-F]{32}|\S+)$")
+    # lsassy prints "DOMAIN\user <nthash>" or "DOMAIN\user <cleartext>". Capture
+    # the secret as the REST OF THE LINE (not a single \S+ token) so a cleartext
+    # password containing spaces is kept whole instead of being cut at the first
+    # space; a bare 32-hex value is still recognised as an NT hash.
+    LINE = re.compile(r"^([^\s\\/]+[\\/]\S+)\s+(.+?)\s*$")
 
     def _parse(self, out: str) -> List[Secret]:
         found = []
@@ -89,7 +92,7 @@ class LsassCollector(_NxcModule):
             m = self.LINE.match(msg.strip())
             if not m:
                 continue
-            user, sec = m.group(1), m.group(2)
+            user, sec = m.group(1), m.group(2).strip()
             if re.fullmatch(r"[0-9a-fA-F]{32}", sec):
                 found.append(Secret(self.host, "LSASS", user, sec, Status.HASH,
                                     secret_type="nthash", notes="from LSASS; PtH"))
