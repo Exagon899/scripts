@@ -5,6 +5,12 @@ Feed every credential you already own; it runs the collectors against the
 target(s), auto-decrypts what each credential can unlock (e.g. browser logins ->
 cleartext), and prints one unified table. Raw tool output saved per host.
 
+By default (autopool) it first dumps the account database on any host you are
+admin on - NTDS (domain users) on a DC, local SAM on a member/standalone host -
+and feeds every dumped user back into the credential pool, so every downstream
+collector runs against all of them automatically. You only have to supply one
+admin credential. Disable with --no-autopool to test ONLY the creds you passed.
+
 Credential forms (--cred, repeatable, or --cred-file):
   DOMAIN/user:Password
   DOMAIN/user#<nthash>            (or #<lmhash>:<nthash>)
@@ -40,6 +46,10 @@ def build_args() -> argparse.ArgumentParser:
     p.add_argument("-d", "--domain", default="", help="default domain for creds without one")
     p.add_argument("--local-auth", action="store_true",
                    help="treat credentials as local (SAM) accounts")
+    p.add_argument("--no-autopool", action="store_true",
+                   help="do NOT dump SAM/NTDS and feed the dumped users into the "
+                        "pool; test only the credentials you supplied (default: "
+                        "autopool enabled)")
     p.add_argument("-o", "--out", default="credhunter_loot",
                    help="output directory (raw output + exports)")
     p.add_argument("--json", action="store_true", help="export loot.json")
@@ -96,11 +106,13 @@ def main() -> int:
     if not pool:
         print("[!] no credentials (use --cred / --cred-file)", file=sys.stderr)
         return 2
-    print(f"[*] {len(pool)} credential(s), {len(targets)} target(s)", file=sys.stderr)
+    print(f"[*] {len(pool)} credential(s), {len(targets)} target(s)"
+          f"{'' if args.no_autopool else ', autopool ON'}", file=sys.stderr)
 
     collectors = select_collectors(args.only, args.skip)
     secrets = run_all(targets, pool, collectors, args.out,
-                      timeout=args.timeout, verbose=args.verbose)
+                      timeout=args.timeout, verbose=args.verbose,
+                      autopool=not args.no_autopool)
 
     print()
     reporter.render_table(secrets)
