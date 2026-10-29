@@ -121,8 +121,10 @@ class _DplootModule(BaseCollector):
 
 class BrowserCollector(_DplootModule):
     name = "Browser"; source = "Browser"; module = "browser"
-    module_extra = ["--show-cookies"]
-    description = "Chrome/Edge/Firefox saved logins + cookies (auto-decrypted)"
+    # --v20support: decrypt Chrome/Edge "app-bound encryption" (v127+), otherwise
+    # modern-Chrome logins/cookies are silently skipped.
+    module_extra = ["--show-cookies", "--v20support"]
+    description = "Chrome/Edge/Firefox saved logins + cookies (auto-decrypted, incl. app-bound v20)"
 
 
 class CredManCollector(_DplootModule):
@@ -181,6 +183,11 @@ class CertificatesCollector(_DplootModule):
         return self._dedup(found)
 
 
+class CngCollector(CertificatesCollector):
+    name = "CNG"; source = "CNG"; module = "cng"
+    description = "CNG (DPAPI-NG / software KSP) private keys"
+
+
 # ---- MACHINE DPAPI (needs admin; dploot machine* subcommands) ----
 
 class MachineCredsCollector(_DplootModule):
@@ -199,3 +206,9 @@ class MachineCertsCollector(CertificatesCollector):
     name = "MachineCert"; source = "MachineCert"; module = "machinecertificates"
     user_level = False
     description = "Machine certificates + private keys (needs admin)"
+
+
+class MachineCngCollector(CertificatesCollector):
+    name = "MachineCNG"; source = "MachineCNG"; module = "machinecng"
+    user_level = False
+    description = "Machine CNG (DPAPI-NG) private keys (needs admin)"
