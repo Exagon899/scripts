@@ -23,7 +23,7 @@ from core.secret import Secret, Status
 from .base import BaseCollector
 
 MAX_FILE = 128 * 1024          # only read files up to 128 KB
-MAX_HITS = 400                 # safety cap on total files inspected
+MAX_HITS = 1000                # safety cap on total files inspected
 
 INTERESTING = re.compile(
     r"(unattend\.xml|autounattend\.xml|sysprep\.(inf|xml)|web\.config|"
@@ -34,12 +34,23 @@ INTERESTING = re.compile(
     r".*\.dmp|logins\.json|key4\.db|key3\.db|"
     r"signons\.sqlite|.*\.jks|.*\.pfx|.*\.p12|credentials\.xml|"
     r"recentservers\.xml|sitemanager\.xml|filezilla\.xml|superputty.*\.xml|"
-    r"sessions\.xml)$", re.I)
+    r"sessions\.xml|"
+    # web-app / DB config files (XAMPP/WAMP/Tomcat/Django/Spring/etc.)
+    r"config\.php|config\.inc\.php|configuration\.php|database\.php|settings\.php|"
+    r"dbconfig\.php|db\.php|appsettings.*\.json|standalone\.xml|context\.xml|"
+    r"server\.xml|tomcat-users\.xml|application\.properties|application\.ya?ml|"
+    r"settings\.py|local_settings\.py|my\.cnf|\.my\.cnf|nginx\.conf|httpd\.conf|"
+    r"httpd-xampp\.conf|"
+    # cloud / CLI credential stores and Kerberos tickets on disk
+    r"\.pgpass|\.netrc|\.npmrc|\.pypirc|azureProfile\.json|accessTokens\.json|"
+    r"\.ccache|\.kirbi|krb5cc.*)$", re.I)
 
 CRED_KW = re.compile(
     r"(password|passwd|pwd|cpassword|secret|connectionstring|accountpassword|"
     r"-asplaintext|convertto-securestring|api[_-]?key|aws_secret|client_secret|"
-    r"BEGIN [A-Z ]*PRIVATE KEY)", re.I)
+    r"BEGIN [A-Z ]*PRIVATE KEY|data source|initial catalog|trusted_connection|"
+    r"jdbc:|mongodb://|mysql://|postgres://|db_password|db_user|define\('DB_|pwd=)",
+    re.I)
 
 # files we only report the path for (binary / pull-and-process offline)
 # NB: registry hives (SAM/SYSTEM/SECURITY/NTDS.dit) are intentionally NOT hunted
@@ -53,8 +64,21 @@ ROOTS: List[Tuple[str, str, int]] = [
     ("C$", "Windows\\Panther", 1),
     ("C$", "Windows\\System32\\sysprep", 1),
     ("C$", "Windows\\Temp", 1),                        # lsass.dmp etc.
-    ("C$", "inetpub\\wwwroot", 3),
-    ("C$", "Users", 4),
+    ("C$", "inetpub", 4),                              # IIS (whole tree, not just wwwroot)
+    ("C$", "Users", 4),                                # also ~/.aws ~/.azure ~/.kube ~/.ssh .docker
+    # web-server / DB install roots (XAMPP, WAMP, Apache, nginx, Tomcat, MySQL...)
+    ("C$", "xampp", 5),
+    ("C$", "wamp", 5),
+    ("C$", "wamp64", 5),
+    ("C$", "laragon", 5),
+    ("C$", "Apache24", 4),
+    ("C$", "nginx", 4),
+    ("C$", "Program Files\\Apache Software Foundation", 5),   # Tomcat
+    ("C$", "Program Files\\MySQL", 4),
+    ("C$", "ProgramData\\MySQL", 4),
+    ("C$", "Program Files\\MariaDB", 4),
+    ("C$", "ProgramData\\MariaDB", 4),
+    ("C$", "Program Files\\PostgreSQL", 4),
     ("C$", "Program Files\\Veeam", 2),
     ("C$", "Program Files\\Jenkins", 2),
     ("C$", "ProgramData\\Jenkins", 3),
