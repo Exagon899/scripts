@@ -10,6 +10,12 @@ from .runtime import RuntimeCollector
 from .config_env import ConfigEnvCollector
 from .browser_chromium import ChromiumCollector
 from .services import ServicesCollector
+from .mail import MailCollector
+from .git import GitCollector
+from .terraform import TerraformCollector
+from .mongo import MongoCollector
+from .ldap import LdapCollector
+from .ftpclients import FtpClientsCollector
 
 ALL_COLLECTORS = [
     # system credential stores (need root)
@@ -26,6 +32,12 @@ ALL_COLLECTORS = [
     ConfigEnvCollector,
     ChromiumCollector,
     ServicesCollector,
+    MailCollector,
+    GitCollector,
+    TerraformCollector,
+    MongoCollector,
+    LdapCollector,
+    FtpClientsCollector,
 ]
 
 
