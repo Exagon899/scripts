@@ -9,7 +9,8 @@ import re
 from typing import List
 
 from core.secret import Secret, Status
-from core.tools import read_text, home_dirs, find_files, CRED_KW, env_pair_is_junk
+from core.tools import (read_text, home_dirs, find_files, CRED_KW,
+                        env_pair_is_junk, is_nonsecret_value, _URL_CREDS_RE)
 from .base import BaseCollector
 
 ROOTS = ["/var/www", "/srv", "/opt", "/usr/share/nginx", "/etc",
@@ -29,6 +30,10 @@ DEFINE_RE = re.compile(r"""define\(\s*['"](DB_\w+|AUTH_KEY|SECURE_AUTH_KEY)['"]\
 ENV_RE = re.compile(r"""^\s*(?:export\s+)?([A-Z0-9_]*(?:PASS|PWD|SECRET|TOKEN|KEY|USER|DSN|URL|DB)[A-Z0-9_]*)\s*=\s*['"]?([^'"#\s][^'"#]*)['"]?""", re.I)
 PHP_VAR_RE = re.compile(r"""\$(?:db_?pass(word)?|password|db_?user|username|dbuser)\s*=\s*['"]([^'"]*)['"]""", re.I)
 PGPASS_RE = re.compile(r"^([^:#]+):([^:]+):([^:]+):([^:]+):(.+)$")
+# fallback: a line that assigns a value to a secret-named key (key = val / key: val)
+FALLBACK_KV = re.compile(
+    r"""['"]?[\w.-]*(?:password|passwd|pass|pwd|secret|token|api[_-]?key|apikey)"""
+    r"""[\w.-]*['"]?\s*[:=]\s*(.+)$""", re.I)
 
 
 class WebConfigCollector(BaseCollector):
@@ -76,12 +81,27 @@ class WebConfigCollector(BaseCollector):
                                   Status.CLEARTEXT, target=path, secret_type="env-cred",
                                   notes="key=value config"))
 
-        # fall back: keyword grep for anything the extractors missed
+        # fall back: only when no structured secret was found. Emit a pointer
+        # only for a real "<secret-key> = <value>" assignment with a plausible
+        # value, or a URL with credentials embedded - not every line that merely
+        # mentions a keyword (that is what dumped Django/Splunk code before).
         if not out:
             hits = 0
             for line in txt.splitlines():
                 line = line.strip()
-                if CRED_KW.search(line) and hits < 8 and len(line) < 300:
+                if not line or len(line) >= 300 or hits >= 8:
+                    continue
+                keep = False
+                if _URL_CREDS_RE.search(line):          # scheme://user:pass@host
+                    keep = True
+                else:
+                    m = FALLBACK_KV.match(line)
+                    if m:
+                        val = m.group(1).strip().strip(",").strip().strip("'\"")
+                        if (len(val) >= 4 and "(" not in val
+                                and not is_nonsecret_value(val)):
+                            keep = True
+                if keep:
                     out.append(Secret("WebConfig", "", line[:200], Status.INFO,
                                       target=path, secret_type="config-hit",
                                       notes=base))
