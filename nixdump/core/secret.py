@@ -25,6 +25,9 @@ class Secret:
     target: str = ""            # where it applies (host, url, file path)
     secret_type: str = ""       # nthash|sha512crypt|password|rsa-key|kdbx|...
     notes: str = ""
+    material: str = ""          # full copy-paste payload for export only (e.g.
+                                # the complete private key); kept out of the
+                                # table, written to JSON when present
 
     def key(self) -> tuple:
         return (self.source, self.username, self.secret, self.target)
@@ -32,4 +35,6 @@ class Secret:
     def as_dict(self) -> dict:
         d = asdict(self)
         d["status"] = self.status.value
+        if not d.get("material"):       # omit empty material to keep JSON clean
+            d.pop("material", None)
         return d
