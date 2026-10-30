@@ -190,13 +190,55 @@ class CngCollector(CertificatesCollector):
 
 # ---- MACHINE DPAPI (needs admin; dploot machine* subcommands) ----
 
-class MachineCredsCollector(_DplootModule):
+class _CredentialBlockParser:
+    """dploot credential/vault dumps print fixed-label blocks where the
+    password sits on a line labelled 'Unknown' (dploot does not name it).
+    The shared KV_RE does not match 'Unknown', so the password is lost and
+    the finding comes back with an empty secret. This parser reads the block
+    directly: 'Username' -> user, the LAST non-empty 'Unknown' -> password,
+    'Target' -> target. Blocks are separated by '[CREDENTIAL]'/'[VAULT]'."""
+
+    def _parse(self, out: str) -> List[Secret]:
+        found: List[Secret] = []
+        user = tgt = ""
+        unknowns: List[str] = []
+
+        def flush():
+            nonlocal user, tgt, unknowns
+            pw = next((u for u in reversed(unknowns) if u), "")
+            if user or pw:
+                found.append(Secret(self.host, self.source, user, pw,
+                                    Status.DECRYPTED, target=tgt,
+                                    secret_type="password"))
+            user = tgt = ""
+            unknowns = []
+
+        for line in strip_ansi(out).splitlines():
+            s = line.strip()
+            if s.startswith("[") and s.endswith("]"):      # [CREDENTIAL] / [VAULT]
+                flush()
+                continue
+            if ":" not in s:
+                continue
+            key, _, val = s.partition(":")
+            key = key.strip().lower(); val = val.strip()
+            if key == "username":
+                user = val
+            elif key == "target":
+                tgt = val
+            elif key == "unknown":
+                unknowns.append(val)
+        flush()
+        return self._dedup(found)
+
+
+class MachineCredsCollector(_CredentialBlockParser, _DplootModule):
     name = "MachineCred"; source = "MachineCred"; module = "machinecredentials"
     user_level = False
     description = "Machine Credential Manager (needs admin)"
 
 
-class MachineVaultsCollector(_DplootModule):
+class MachineVaultsCollector(_CredentialBlockParser, _DplootModule):
     name = "MachineVault"; source = "MachineVault"; module = "machinevaults"
     user_level = False
     description = "Machine Vaults (needs admin)"
