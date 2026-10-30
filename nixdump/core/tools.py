@@ -212,6 +212,39 @@ _HARDWORDS = {"pass", "passwd", "password", "pwd", "secret", "token", "apikey",
 _URLWORDS = {"uri", "uris", "endpoint", "endpoints", "href", "dsn"}
 _URL_CREDS_RE = re.compile(r"://[^/@\s]*:[^/@\s]+@")   # scheme://[user]:pass@host
 
+# Secrets that live in a URL path or query string, not in a user:pass@ part:
+# slack/discord/teams webhooks, presigned S3 / Azure SAS, ?api_key=/&token=/&sig=
+_URL_WEBHOOK_RE = re.compile(
+    r"https://hooks\.slack\.com/services/[A-Z0-9/]+"
+    r"|https://discord(?:app)?\.com/api/webhooks/\d+/[\w-]+"
+    r"|https://[\w.-]*\.webhook\.office\.com/[\w/-]+", re.I)
+_URL_PRESIGNED_RE = re.compile(
+    r"[?&](?:X-Amz-Signature|X-Amz-Credential|sig|sv)=", re.I)
+_URL_QUERY_SECRET_RE = re.compile(
+    r"[?&](?:api[_-]?key|apikey|access[_-]?key|secret|token|auth|sig|signature"
+    r"|x-amz-signature|x-amz-credential|sas|code|password|passwd|pwd)"
+    r"=([^&\s'\"]{8,})", re.I)
+
+
+def url_has_secret(value: str) -> bool:
+    """True if a URL carries a secret in its path/query (not just user:pass@)."""
+    if not value or "://" not in value:
+        return False
+    v = value.strip().strip("'\"")
+    return bool(_URL_WEBHOOK_RE.search(v) or _URL_PRESIGNED_RE.search(v)
+                or _URL_QUERY_SECRET_RE.search(v))
+
+
+def url_secret_kind(value: str) -> str:
+    v = (value or "").strip().strip("'\"")
+    if _URL_WEBHOOK_RE.search(v):
+        return "webhook-url"
+    if _URL_PRESIGNED_RE.search(v):
+        return "presigned-url"
+    if _URL_QUERY_SECRET_RE.search(v):
+        return "url-query-secret"
+    return "url-secret"
+
 
 def is_benign_name(name: str) -> bool:
     return (name or "").strip().lower() in BENIGN_NAMES
@@ -260,7 +293,10 @@ def env_pair_is_junk(name: str, value: str) -> bool:
     hard = _name_is_secretish(name)
     if is_nonsecret_value(value, hard=hard):
         return True
-    # *_URL / *_URI / *_DSN: only loot when the value embeds credentials
-    if not hard and _name_is_urlish(name) and not _URL_CREDS_RE.search(value or ""):
+    # *_URL / *_URI / *_DSN: only loot when the value embeds credentials -
+    # either user:pass@ or a secret in the path/query (webhook, presigned, ?api_key=)
+    if (not hard and _name_is_urlish(name)
+            and not _URL_CREDS_RE.search(value or "")
+            and not url_has_secret(value or "")):
         return True
     return False
