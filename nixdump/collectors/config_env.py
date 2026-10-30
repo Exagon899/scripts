@@ -26,11 +26,20 @@ _SECRET_KV = re.compile(
     r"""PRIVATE_KEY|CREDENTIAL|AUTH)[A-Za-z0-9_]*)"""
     r"""\s*=\s*['"]?([^'"#\n]{1,500})['"]?""", re.I)
 
-# inline secret flags passed to tools in scripts/cron: -p PASS, --password=PASS,
-# mysql -pPASS, smbclient user%pass, curl -u user:pass, sshpass -p PASS
+# inline password flags, scoped to tools that actually take a password this way,
+# so generic long options (--pidfile, --purge, --report, --list) never match.
+# Covers: --password=PASS / --password PASS, mysql/mysqldump -pPASS (no space),
+# sshpass -p PASS, curl -u user:pass. A bare "-p" is NOT treated as a password
+# flag because far too many tools use -p for other things.
 _INLINE_FLAG = re.compile(
-    r"""(?:--password[=\s]+|--pass[=\s]+|-p\s*|sshpass\s+-p\s*|"""
-    r"""mysql[^\n]*?-p|-u\s+[^\s:]+:)['"]?([^\s'"|&;]{3,})""", re.I)
+    r"""(?:--password(?:=|\s+)"""                      # --password=X / --password X
+    r"""|\bmysql\w*\b[^\n]*?\s-p"""                     # mysql/mysqldump -pX (attached)
+    r"""|\bsshpass\s+-p\s*"""                           # sshpass -p X
+    r"""|\bcurl\b[^\n]*?\s-u\s+[^\s:]+:)"""             # curl -u user:pass
+    r"""['"]?([^\s'"|&;]{3,})""", re.I)
+
+# generic value guards: reject shell variables, option-looking tokens, paths
+_FLAG_JUNK = re.compile(r"""^(?:\$|-|/|["']?\$)""")
 
 # user%password form (smbclient / mount.cifs)
 _USER_PCT_PASS = re.compile(r"\b([A-Za-z0-9_.\-\\]+)%([^\s'\"|&;]{3,})")
@@ -64,11 +73,13 @@ def _scan_lines(path: str, txt: str, owner: str, source: str) -> List[Secret]:
                               target=path, secret_type=kind, notes="URL creds"))
             continue
 
-        # inline tool flags (-p, --password, sshpass, mysql -p, curl -u u:p)
+        # inline password flags (--password, sshpass -p, mysql -pX, curl -u u:p)
         fm = _INLINE_FLAG.search(line)
         if fm:
             val = fm.group(1)
-            if len(val) >= 3 and not is_nonsecret_value(val):
+            # reject shell vars ($x), option tokens (-x), paths (/x) and non-secrets
+            if (len(val) >= 3 and not _FLAG_JUNK.search(val)
+                    and not is_nonsecret_value(val)):
                 out.append(Secret(source, owner, val, Status.CLEARTEXT,
                                   target=path, secret_type="inline-flag-cred",
                                   notes="cmd flag: " + line[:120]))
