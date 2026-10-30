@@ -31,3 +31,11 @@ class BaseCollector:
     @property
     def wordlist(self):
         return self.opts.get("wordlist")
+
+    @property
+    def offline(self) -> bool:
+        return bool(self.opts.get("offline"))
+
+    @property
+    def meta_dir(self):
+        return self.opts.get("meta_dir")
