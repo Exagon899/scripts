@@ -8,7 +8,8 @@ import re
 from typing import List
 
 from core.secret import Secret, Status
-from core.tools import read_text, home_dirs, user_of_home, find_files, which, run
+from core.tools import (read_text, home_dirs, user_of_home, find_files,
+                        which, run, exists, realpath)
 from core import cracker
 from .base import BaseCollector
 
@@ -41,7 +42,7 @@ class AppsCollector(BaseCollector):
         if self.crack_enabled and files and which("keepass2john"):
             lines = []
             for f in files:
-                r = run(["keepass2john", f], timeout=30)
+                r = run(["keepass2john", realpath(f)], timeout=30)
                 for ln in r.output.splitlines():
                     if ln.strip() and ":" in ln and "$keepass$" in ln:
                         lines.append(ln.strip())
@@ -64,7 +65,7 @@ class AppsCollector(BaseCollector):
         for prof in sorted(profile_dirs):
             if ff and self.crack_enabled:
                 # firefox_decrypt prints User/Password; empty master pw auto-works
-                r = run([ff, "-n", prof], timeout=60)
+                r = run([ff, "-n", realpath(prof)], timeout=60)
                 out += self._parse_ffdecrypt(r.output, prof)
             else:
                 out.append(Secret("Apps", "", prof, Status.INFO, target=prof,
@@ -107,7 +108,7 @@ class AppsCollector(BaseCollector):
                 (".password-store", "pass", "pass(1) store - GPG-encrypted"),
             ):
                 p = os.path.join(h, rel)
-                if os.path.exists(p):
+                if exists(p):
                     out.append(Secret("Apps", user, p, Status.INFO, target=p,
                                       secret_type=typ, notes=note))
         return out
