@@ -15,6 +15,29 @@ from typing import Iterable, List, Optional, Tuple
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
+# When looting offline from a collected bundle, every absolute target path is
+# read from under this root instead of the live filesystem. Live mode = "".
+ROOT = ""
+
+
+def set_root(path: str) -> None:
+    global ROOT
+    ROOT = path.rstrip("/") if path else ""
+
+
+def _real(p: str) -> str:
+    """Logical (target-absolute) path -> real path on this disk."""
+    if ROOT and p.startswith("/"):
+        return ROOT + p
+    return p
+
+
+def _logical(p: str) -> str:
+    """Real path on disk -> logical (target-absolute) path for display/re-read."""
+    if ROOT and p.startswith(ROOT):
+        return p[len(ROOT):] or "/"
+    return p
+
 
 def strip_ansi(s: str) -> str:
     return _ANSI_RE.sub("", s).replace("\x00", "")
@@ -34,7 +57,7 @@ def which(name: str) -> Optional[str]:
 def read_text(path: str, max_bytes: int = 512 * 1024) -> Optional[str]:
     """Read a file as text, capped. Returns None if unreadable."""
     try:
-        with open(path, "rb") as fh:
+        with open(_real(path), "rb") as fh:
             data = fh.read(max_bytes + 1)
         return data.decode("utf-8", errors="ignore")
     except OSError:
@@ -43,23 +66,37 @@ def read_text(path: str, max_bytes: int = 512 * 1024) -> Optional[str]:
 
 def read_bytes(path: str, max_bytes: int = 4 * 1024 * 1024) -> Optional[bytes]:
     try:
-        with open(path, "rb") as fh:
+        with open(_real(path), "rb") as fh:
             return fh.read(max_bytes)
     except OSError:
         return None
+
+
+def realpath(path: str) -> str:
+    """Public: map a logical target path to the real on-disk path. Use when
+    handing a collected file to an external tool (john, ssh2john, firefox_decrypt)."""
+    return _real(path)
+
+
+def exists(path: str) -> bool:
+    return os.path.exists(_real(path))
+
+
+def isdir(path: str) -> bool:
+    return os.path.isdir(_real(path))
 
 
 def home_dirs() -> List[str]:
     """Every real user home + /root (what we can see). Root sees all; a normal
     user usually only their own, but we try all and let reads fail gracefully."""
     homes = set()
-    if os.path.isdir("/root"):
+    if os.path.isdir(_real("/root")):
         homes.add("/root")
     for base in ("/home",):
         try:
-            for name in os.listdir(base):
+            for name in os.listdir(_real(base)):
                 p = os.path.join(base, name)
-                if os.path.isdir(p):
+                if os.path.isdir(_real(p)):
                     homes.add(p)
         except OSError:
             pass
@@ -68,7 +105,7 @@ def home_dirs() -> List[str]:
     if pw:
         for line in pw.splitlines():
             parts = line.split(":")
-            if len(parts) >= 6 and parts[5].startswith("/") and os.path.isdir(parts[5]):
+            if len(parts) >= 6 and parts[5].startswith("/") and os.path.isdir(_real(parts[5])):
                 homes.add(parts[5])
     return sorted(homes)
 
@@ -87,10 +124,11 @@ def find_files(roots: Iterable[str], name_regex: re.Pattern, max_depth: int = 6,
     and capped so it can't run away on a huge filesystem."""
     hits: List[str] = []
     for root in roots:
-        if not os.path.isdir(root):
+        rroot = _real(root)
+        if not os.path.isdir(rroot):
             continue
-        base_depth = root.rstrip("/").count("/")
-        for dirpath, dirnames, filenames in os.walk(root, followlinks=follow_symlinks):
+        base_depth = rroot.rstrip("/").count("/")
+        for dirpath, dirnames, filenames in os.walk(rroot, followlinks=follow_symlinks):
             depth = dirpath.rstrip("/").count("/") - base_depth
             if depth >= max_depth:
                 dirnames[:] = []
@@ -100,7 +138,7 @@ def find_files(roots: Iterable[str], name_regex: re.Pattern, max_depth: int = 6,
                             ".cache", "__pycache__")]
             for fn in filenames:
                 if name_regex.search(fn):
-                    hits.append(os.path.join(dirpath, fn))
+                    hits.append(_logical(os.path.join(dirpath, fn)))
                     if len(hits) >= max_hits:
                         return hits
     return hits
