@@ -21,21 +21,28 @@ class BaseCollector:
 
     # convenience for subclasses
     @property
-    def home_only(self) -> bool:
-        return bool(self.opts.get("home_only"))
-
-    @property
     def crack_enabled(self) -> bool:
-        return bool(self.opts.get("crack"))
+        return bool(self.opts.get("crack", True))
 
     @property
     def wordlist(self):
         return self.opts.get("wordlist")
 
     @property
-    def offline(self) -> bool:
-        return bool(self.opts.get("offline"))
-
-    @property
     def meta_dir(self):
         return self.opts.get("meta_dir")
+
+    def status(self, msg: str) -> None:
+        """Update the live progress line (set by the runner); no-op if absent."""
+        cb = self.opts.get("status_cb")
+        if cb:
+            cb(msg)
+
+    def progress_cb(self):
+        """Return a callback cracker.crack() can drive for live crack progress."""
+        cb = self.opts.get("status_cb")
+        if not cb:
+            return None
+        def _cb(label, pct, cracked, total):
+            cb("cracking %s  %.1f%%  %d/%d cracked" % (label, pct, cracked, total))
+        return _cb
