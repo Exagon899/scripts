@@ -25,11 +25,8 @@ class RuntimeCollector(BaseCollector):
 
     def collect(self) -> List[Secret]:
         found: List[Secret] = []
-        if self.offline:
-            # /proc is not in the bundle; parse the shell collector's capture
-            found += self._proc_offline()
-        else:
-            found += self._proc()
+        # /proc is not in the bundle; parse the shell collector's meta capture
+        found += self._proc_offline()
         found += self._kerberos()
         return found
 
