@@ -7,6 +7,9 @@ from .cloud import CloudCollector
 from .apps import AppsCollector
 from .network import NetworkCollector
 from .runtime import RuntimeCollector
+from .config_env import ConfigEnvCollector
+from .browser_chromium import ChromiumCollector
+from .services import ServicesCollector
 
 ALL_COLLECTORS = [
     # system credential stores (need root)
@@ -20,6 +23,9 @@ ALL_COLLECTORS = [
     HistoryCollector,
     NetworkCollector,
     RuntimeCollector,
+    ConfigEnvCollector,
+    ChromiumCollector,
+    ServicesCollector,
 ]
 
 
