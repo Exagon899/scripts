@@ -91,6 +91,7 @@ cp_one /etc/crontab
 cp_one /etc/environment
 cp_one /etc/profile
 cp_one /etc/bash.bashrc
+cp_one /etc/zsh/zshrc
 cp_dir /etc/cron.d
 cp_dir /etc/cron.daily
 cp_dir /etc/cron.hourly
@@ -123,6 +124,13 @@ cp_find "*.conf" /etc/kubernetes
 # db / backup dumps (pointers; grep offline)
 cp_find "*.sql" /var/www /srv /opt /var/backups /root /home
 cp_find "*.bak" /var/www /srv /opt /var/backups /root /home
+
+# ================= CI / CONFIG-MGMT (apps.py) ===========================
+# jenkins secrets, ansible vaults, tomcat users - read by the apps collector
+cp_dir /var/lib/jenkins/secrets
+cp_find "credentials.xml" /var/lib/jenkins /var/jenkins_home
+cp_find "*.yml" /etc/ansible
+cp_find "tomcat-users.xml" /etc/tomcat* /usr/share/tomcat* /var/lib/tomcat*
 
 # ================= WEB / DB / APP CONFIGS (walk) =================
 WEBROOTS="/var/www /srv /opt /usr/share/nginx /usr/local/www /var/lib /etc"
