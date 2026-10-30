@@ -10,7 +10,8 @@ import re
 from typing import List
 
 from core.secret import Secret, Status
-from core.tools import read_text, home_dirs, user_of_home, find_files, which, run
+from core.tools import (read_text, home_dirs, user_of_home, find_files,
+                        which, run, realpath)
 from core import cracker
 from .base import BaseCollector
 
@@ -64,8 +65,8 @@ class SshCollector(BaseCollector):
                                         Status.INFO, secret_type=fn, target=p,
                                         notes=note))
 
-        # agent
-        if which("ssh-add"):
+        # agent (LIVE only - offline, agent state comes from the bundle's meta)
+        if not self.offline and which("ssh-add"):
             r = run(["ssh-add", "-l"], timeout=10)
             if r.rc == 0 and "no identities" not in r.output.lower():
                 for line in r.output.splitlines():
@@ -78,7 +79,7 @@ class SshCollector(BaseCollector):
         if self.crack_enabled and enc_for_crack and which("ssh2john"):
             lines = []
             for f in enc_for_crack:
-                r = run(["ssh2john", f], timeout=30)
+                r = run(["ssh2john", realpath(f)], timeout=30)
                 for ln in r.output.splitlines():
                     if ln.strip() and ":" in ln:
                         lines.append(ln.strip())
