@@ -26,5 +26,5 @@ for t in john hashcat ssh2john keepass2john firefox_decrypt; do
 done
 
 echo
-echo "[*] run:   python3 nixdump.py            (loot)"
-echo "[*] crack: python3 nixdump.py --crack    (needs john + wordlist)"
+echo "[*] target:  sh nixdump.sh                     -> builds the bundle"
+echo "[*] vm:      python3 nixdump.py bundle.tar.gz  (cracks by default; --no-crack to skip)"
