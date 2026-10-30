@@ -57,7 +57,9 @@ class ShadowCollector(BaseCollector):
             unshadow_lines.append(f"{user}:{h}")
 
         if self.crack_enabled and unshadow_lines:
-            cracked = cracker.crack(unshadow_lines, self.wordlist)
+            self.status("cracking shadow")
+            cracked = cracker.crack(unshadow_lines, self.wordlist, label="shadow",
+                                    progress_cb=self.progress_cb())
             for user, pw in cracked.items():
                 found.append(Secret("Shadow", user, pw, Status.CRACKED,
                                     secret_type="password",
@@ -86,9 +88,11 @@ class SssdCollector(BaseCollector):
                                     secret_type="sha512crypt", target=f,
                                     notes="cached domain hash; john/hashcat -m 1800"))
             if found and self.crack_enabled:
+                self.status("cracking sssd")
                 lines = [f"sssd{i}:{s.secret}" for i, s in enumerate(found)
                          if s.secret_type == "sha512crypt"]
-                cracked = cracker.crack(lines, self.wordlist)
+                cracked = cracker.crack(lines, self.wordlist, label="sssd",
+                                        progress_cb=self.progress_cb())
                 for pw in cracked.values():
                     found.append(Secret("SSSD", "", pw, Status.CRACKED,
                                         secret_type="password",
