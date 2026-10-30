@@ -60,32 +60,72 @@ def select(only, skip):
     return chosen
 
 
+_IP_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
+
+
 def _agent_findings(meta_dir) -> list:
-    """meta/ssh_agent.txt -> INFO findings: agent keys (hijackable LIVE on the
-    box, never in the bundle), agent sockets, and SSH source IPs."""
+    """meta/ssh_agent.txt -> clean INFO findings: agent keys (hijackable LIVE on
+    the box, never in the bundle), agent sockets, logged-in users with the IP
+    they came from, and inbound SSH source IPs. Raw `w`/`ss` output is parsed
+    down to (user, ip) / peer-ip instead of dumping whole lines."""
     try:
         with open(os.path.join(meta_dir, "ssh_agent.txt"), errors="ignore") as fh:
             lines = fh.read().splitlines()
     except OSError:
         return []
-    out, section = [], ""
+    out, section, seen = [], "", set()
     for ln in lines:
         s = ln.strip()
         if s.startswith("## "):
             section = s[3:].lower(); continue
         if not s or s.startswith("<"):
             continue
+
         if ("ssh-add" in section or "keys loaded" in section) and re.search(r"SHA256:|MD5:|^\d{3,4} ", s):
+            if ("key", s[:80]) in seen:
+                continue
+            seen.add(("key", s[:80]))
             out.append(Secret("SSH-Agent", "", s[:160], Status.INFO,
                               secret_type="agent-key",
                               notes="key loaded in a target agent; hijack LIVE via SSH_AUTH_SOCK"))
+
         elif "agent sockets" in section and "agent." in s:
+            if ("sock", s) in seen:
+                continue
+            seen.add(("sock", s))
             out.append(Secret("SSH-Agent", "", s[:160], Status.INFO,
                               secret_type="agent-sock",
                               notes="agent socket on target (owner = whose agent)"))
-        elif "came from" in section or "inbound ssh" in section:
-            out.append(Secret("SSH-Agent", "", s[:160], Status.INFO,
-                              secret_type="login-src", notes="logged-in user / SSH source IP"))
+
+        # logged-in users: who + w output -> (user, source-ip)
+        elif "came from" in section:
+            low = s.lower()
+            if "load average" in low or low.startswith("user ") or low.startswith("user\t"):
+                continue                      # skip w's uptime line and column header
+            parts = s.split()
+            m = _IP_RE.search(s)
+            if not parts or not m:
+                continue
+            user, ip = parts[0], m.group(1)
+            if ("login", user, ip) in seen:
+                continue
+            seen.add(("login", user, ip))
+            out.append(Secret("SSH-Agent", user, ip, Status.INFO,
+                              secret_type="login-src", target=ip,
+                              notes="logged-in user and the source IP they came from"))
+
+        # established inbound ssh (ss/netstat): peer IP is the loot
+        elif "inbound ssh" in section:
+            ips = _IP_RE.findall(s)
+            if not ips:
+                continue
+            peer = ips[-1]                    # ss prints local (:22) first, peer last
+            if ("inbound", peer) in seen:
+                continue
+            seen.add(("inbound", peer))
+            out.append(Secret("SSH-Agent", "", peer, Status.INFO,
+                              secret_type="inbound-ssh", target=peer,
+                              notes="established inbound SSH connection (source IP)"))
     return out
 
 
