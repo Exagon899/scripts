@@ -65,25 +65,19 @@ class SshCollector(BaseCollector):
                                         Status.INFO, secret_type=fn, target=p,
                                         notes=note))
 
-        # agent (LIVE only - offline, agent state comes from the bundle's meta)
-        if not self.offline and which("ssh-add"):
-            r = run(["ssh-add", "-l"], timeout=10)
-            if r.rc == 0 and "no identities" not in r.output.lower():
-                for line in r.output.splitlines():
-                    if line.strip():
-                        found.append(Secret("SSH", "", line.strip(), Status.INFO,
-                                            secret_type="agent-key",
-                                            notes="key in ssh-agent; usable now"))
+        # (ssh-agent intel is parsed from the bundle's meta by the runner)
 
-        # optional crack of encrypted keys via ssh2john
+        # crack encrypted key passphrases via ssh2john -> john
         if self.crack_enabled and enc_for_crack and which("ssh2john"):
+            self.status("cracking ssh keys")
             lines = []
             for f in enc_for_crack:
                 r = run(["ssh2john", realpath(f)], timeout=30)
                 for ln in r.output.splitlines():
                     if ln.strip() and ":" in ln:
                         lines.append(ln.strip())
-            cracked = cracker.crack(lines, self.wordlist)
+            cracked = cracker.crack(lines, self.wordlist, label="ssh-keys",
+                                    progress_cb=self.progress_cb())
             for ident, pw in cracked.items():
                 found.append(Secret("SSH", "", pw, Status.CRACKED,
                                     secret_type="ssh-key-pass", target=ident,
