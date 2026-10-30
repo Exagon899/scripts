@@ -7,7 +7,7 @@ import os
 from typing import List
 
 from core.secret import Secret, Status
-from core.tools import read_text, read_bytes, home_dirs, user_of_home
+from core.tools import read_text, home_dirs, user_of_home, exists, isdir
 from .base import BaseCollector
 
 # (relative path under home, type, note). Cleartext text files get dumped;
@@ -49,7 +49,7 @@ class CloudCollector(BaseCollector):
             user = user_of_home(h)
             for rel, typ, note in TEXT_FILES:
                 p = os.path.join(h, rel)
-                if os.path.isdir(p):
+                if isdir(p):
                     found.append(Secret("Cloud", user, p, Status.INFO,
                                         target=p, secret_type=typ,
                                         notes=note + " (dir - review)"))
@@ -63,7 +63,7 @@ class CloudCollector(BaseCollector):
                                     target=p, secret_type=typ, notes=note))
             for rel, typ, note in BINARY_FLAG:
                 p = os.path.join(h, rel)
-                if os.path.exists(p):
+                if exists(p):
                     found.append(Secret("Cloud", user, p, Status.INFO,
                                         target=p, secret_type=typ, notes=note))
         return found
