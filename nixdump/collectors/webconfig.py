@@ -9,7 +9,7 @@ import re
 from typing import List
 
 from core.secret import Secret, Status
-from core.tools import read_text, home_dirs, find_files, CRED_KW
+from core.tools import read_text, home_dirs, find_files, CRED_KW, env_pair_is_junk
 from .base import BaseCollector
 
 ROOTS = ["/var/www", "/srv", "/opt", "/usr/share/nginx", "/etc",
@@ -71,7 +71,7 @@ class WebConfigCollector(BaseCollector):
         # .env / KEY=VALUE style
         for line in txt.splitlines():
             m = ENV_RE.match(line)
-            if m and len(m.group(2)) < 200:
+            if m and len(m.group(2)) < 200 and not env_pair_is_junk(m.group(1), m.group(2)):
                 out.append(Secret("WebConfig", "", f"{m.group(1)}={m.group(2)}",
                                   Status.CLEARTEXT, target=path, secret_type="env-cred",
                                   notes="key=value config"))
