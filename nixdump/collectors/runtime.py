@@ -9,14 +9,25 @@ import re
 from typing import List
 
 from core.secret import Secret, Status
-from core.tools import read_bytes, read_text, is_root, find_files
+from core.tools import read_bytes, read_text, is_root, find_files, env_pair_is_junk
 from .base import BaseCollector
 
 ENV_SECRET = re.compile(
     r"^([A-Z0-9_]*(PASS|PWD|SECRET|TOKEN|APIKEY|API_KEY|KEY|DSN|CONN|AUTH)[A-Z0-9_]*)=(.+)$",
     re.I)
-CMD_SECRET = re.compile(r"(-p\s*\S+|--password[= ]\S+|sshpass\s+-p\s*\S+|"
-                        r"token=\S+|secret=\S+|api[_-]?key=\S+)", re.I)
+# explicit inline-secret patterns (always a credential, never a port/path/flag)
+CMD_SECRET = re.compile(
+    r"(--password[= ]\S+|sshpass\s+-p\s*\S+|PGPASSWORD=\S+|MYSQL_PWD=\S+|"
+    r"redis-cli\b[^\n]*\s-a\s*\S+|\btoken=\S+|\bsecret=\S+|"
+    r"\bapi[_-]?key=\S+|\baccess[_-]?key=\S+)", re.I)
+# short -pVALUE (no space) only next to a client that uses -p for the PASSWORD
+# (mysql/mariadb/mongo). psql/redis use -p for the PORT, so they are excluded.
+CMD_DB_P = re.compile(
+    r"\b(mysql|mysqldump|mariadb|mongo|mongosh)\b[^\n]*\s-p\S+", re.I)
+
+
+def _cmd_has_secret(cmd: str) -> bool:
+    return bool(CMD_SECRET.search(cmd) or CMD_DB_P.search(cmd))
 
 
 class RuntimeCollector(BaseCollector):
@@ -60,7 +71,7 @@ class RuntimeCollector(BaseCollector):
                     except Exception:
                         continue
                     m = ENV_SECRET.match(s)
-                    if m and len(m.group(3)) < 200:
+                    if m and len(m.group(3)) < 200 and not env_pair_is_junk(m.group(1), m.group(3)):
                         k = (m.group(1), m.group(3))
                         if k in seen:
                             continue
@@ -73,7 +84,7 @@ class RuntimeCollector(BaseCollector):
             cl = read_bytes(f"/proc/{pid}/cmdline", max_bytes=16 * 1024)
             if cl:
                 cmd = cl.replace(b"\x00", b" ").decode("utf-8", "ignore").strip()
-                if CMD_SECRET.search(cmd):
+                if _cmd_has_secret(cmd):
                     if cmd[:160] not in seen:
                         seen.add(cmd[:160])
                         out.append(Secret("Runtime", "", cmd[:200], Status.INFO,
@@ -121,7 +132,7 @@ def parse_proc_capture(text: str) -> List[Secret]:
             continue
         if line.startswith("CMDLINE:"):
             cmd = line[len("CMDLINE:"):].strip()
-            if CMD_SECRET.search(cmd) and cmd[:160] not in seen:
+            if _cmd_has_secret(cmd) and cmd[:160] not in seen:
                 seen.add(cmd[:160])
                 out.append(Secret("Runtime", "", cmd[:200], Status.INFO,
                                   target=f"pid {pid} ({comm})",
@@ -134,7 +145,7 @@ def parse_proc_capture(text: str) -> List[Secret]:
             continue
         if in_env:
             me = ENV_SECRET.match(line.strip())
-            if me and len(me.group(3)) < 200:
+            if me and len(me.group(3)) < 200 and not env_pair_is_junk(me.group(1), me.group(3)):
                 k = (me.group(1), me.group(3))
                 if k not in seen:
                     seen.add(k)
