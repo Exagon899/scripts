@@ -180,3 +180,87 @@ CRED_KW = re.compile(
     r"postgres(ql)?://|amqp://|ftp://[^\s]*:[^\s]*@|://[^\s/]*:[^\s/@]+@|"
     r"BEGIN [A-Z ]*PRIVATE KEY|-----BEGIN|define\(['\"]DB_|pwd=|passwd=)",
     re.I)
+
+
+# --- noise filtering --------------------------------------------------------
+# Decide whether a KEY=VALUE finding (process env / config) is real loot or just
+# config scaffolding, code, a path or a placeholder. Conservative: a value is
+# only dropped when it provably cannot be a live credential, so real secrets are
+# never filtered. When the key NAME itself says "secret" (password/token/key/...)
+# the path/number heuristics are skipped - a real password may look like either.
+
+# env-var / config-key NAMES that are never secrets (exact match, lowercased)
+BENIGN_NAMES = {
+    "pwd", "oldpwd", "shlvl", "path", "home", "user", "logname", "term",
+    "lang", "mail", "shell", "hostname", "tz", "editor", "pager", "colorterm",
+    "ssh_connection", "ssh_client", "ssh_tty", "ssh_auth_sock",
+    "xdg_runtime_dir", "xdg_session_id", "xdg_session_type",
+    "xdg_session_class", "xdg_data_dirs", "xdg_config_dirs", "xdg_seat",
+    "xdg_vtnr", "dbus_session_bus_address", "ls_colors",
+    "systemd_nss_bypass_bus", "systemd_exec_pid", "invocation_id",
+    "journal_stream", "managerpid", "notify_socket", "listen_pid",
+    "listen_fds", "runlevel", "previous", "_",
+}
+
+_TEMPLATE_RE = re.compile(r"\{\{|\}\}|\$\{|%\(|%s\b|<[a-zA-Z_]+>")
+_NULLISH = {
+    "", "none", "null", "nil", "true", "false", "changeme", "change_me",
+    "yourpassword", "your_password", "example", "placeholder", "redacted",
+}
+_HARDWORDS = {"pass", "passwd", "password", "pwd", "secret", "token", "apikey",
+              "credential", "credentials", "passphrase", "privatekey"}
+_URLWORDS = {"uri", "uris", "endpoint", "endpoints", "href", "dsn"}
+_URL_CREDS_RE = re.compile(r"://[^/@\s]*:[^/@\s]+@")   # scheme://[user]:pass@host
+
+
+def is_benign_name(name: str) -> bool:
+    return (name or "").strip().lower() in BENIGN_NAMES
+
+
+def _name_is_secretish(name: str) -> bool:
+    for seg in re.split(r"[^a-z0-9]+", (name or "").lower()):
+        if (seg in _HARDWORDS or seg.startswith("passw") or seg.startswith("secret")
+                or seg.startswith("token") or seg.startswith("apikey")):
+            return True
+    return False
+
+
+def _name_is_urlish(name: str) -> bool:
+    for seg in re.split(r"[^a-z0-9]+", (name or "").lower()):
+        if seg in _URLWORDS or seg.startswith("url"):
+            return True
+    return False
+
+
+def is_nonsecret_value(value: str, hard: bool = False) -> bool:
+    """True = structurally not a secret. With hard=True (key name already means
+    'secret') only template/null/code is rejected - never path/number, because a
+    real password may legitimately look like those."""
+    v = (value or "").strip().strip("'\"")
+    if v.lower() in _NULLISH:
+        return True
+    if _TEMPLATE_RE.search(v):                      # {{x}} ${x} %s %(x)s <pass>
+        return True
+    if (v.startswith("(") or v.endswith("(") or v.startswith("[")
+            or "import " in v or "()" in v):
+        return True                                 # code: get_config(  X=(
+    if hard:
+        return False
+    if v.startswith("/") and "://" not in v and "@" not in v:
+        return True                                 # bare filesystem path
+    if re.fullmatch(r"[-+]?\d+", v):                # pure integer / flag value
+        return True
+    return False
+
+
+def env_pair_is_junk(name: str, value: str) -> bool:
+    """Unified gate for KEY=VALUE findings. True = drop (not loot)."""
+    if is_benign_name(name):
+        return True
+    hard = _name_is_secretish(name)
+    if is_nonsecret_value(value, hard=hard):
+        return True
+    # *_URL / *_URI / *_DSN: only loot when the value embeds credentials
+    if not hard and _name_is_urlish(name) and not _URL_CREDS_RE.search(value or ""):
+        return True
+    return False
