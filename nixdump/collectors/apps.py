@@ -40,13 +40,15 @@ class AppsCollector(BaseCollector):
                               secret_type="kdbx",
                               notes="KeePass DB; crack master: keepass2john -> john"))
         if self.crack_enabled and files and which("keepass2john"):
+            self.status("cracking keepass")
             lines = []
             for f in files:
                 r = run(["keepass2john", realpath(f)], timeout=30)
                 for ln in r.output.splitlines():
                     if ln.strip() and ":" in ln and "$keepass$" in ln:
                         lines.append(ln.strip())
-            for ident, pw in cracker.crack(lines, self.wordlist).items():
+            for ident, pw in cracker.crack(lines, self.wordlist, label="keepass",
+                                           progress_cb=self.progress_cb()).items():
                 out.append(Secret("Apps", "", pw, Status.CRACKED,
                                   secret_type="kdbx-master", target=ident,
                                   notes="cracked KeePass master pw"))
