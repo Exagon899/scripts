@@ -25,9 +25,25 @@ class RuntimeCollector(BaseCollector):
 
     def collect(self) -> List[Secret]:
         found: List[Secret] = []
-        found += self._proc()
+        if self.offline:
+            # /proc is not in the bundle; parse the shell collector's capture
+            found += self._proc_offline()
+        else:
+            found += self._proc()
         found += self._kerberos()
         return found
+
+    def _proc_offline(self) -> List[Secret]:
+        """Parse meta/proc.txt captured on the target by nixdump.sh."""
+        if not self.meta_dir:
+            return []
+        try:
+            with open(os.path.join(self.meta_dir, "proc.txt"), "r",
+                      encoding="utf-8", errors="ignore") as fh:
+                text = fh.read()
+        except OSError:
+            return []
+        return parse_proc_capture(text)
 
     def _proc(self) -> List[Secret]:
         out = []
@@ -83,3 +99,50 @@ class RuntimeCollector(BaseCollector):
                               secret_type="keytab",
                               notes="Kerberos keytab; klist -k / impacket w/ keytab"))
         return out
+
+
+HEADER_RE = re.compile(r"^=== PID (\d+) \((.*)\) ===$")
+
+
+def parse_proc_capture(text: str) -> List[Secret]:
+    """Parse the meta/proc.txt format written by nixdump.sh:
+        === PID <pid> (<comm>) ===
+        CMDLINE: <cmd>
+        ENVIRON:
+        KEY=val
+        ...
+    Apply the same secret regexes used for live /proc."""
+    out: List[Secret] = []
+    seen = set()
+    pid = comm = ""
+    in_env = False
+    for line in text.splitlines():
+        m = HEADER_RE.match(line)
+        if m:
+            pid, comm = m.group(1), m.group(2)
+            in_env = False
+            continue
+        if line.startswith("CMDLINE:"):
+            cmd = line[len("CMDLINE:"):].strip()
+            if CMD_SECRET.search(cmd) and cmd[:160] not in seen:
+                seen.add(cmd[:160])
+                out.append(Secret("Runtime", "", cmd[:200], Status.INFO,
+                                  target=f"pid {pid} ({comm})",
+                                  secret_type="proc-cmdline",
+                                  notes="secret on process command line"))
+            in_env = False
+            continue
+        if line.strip() == "ENVIRON:":
+            in_env = True
+            continue
+        if in_env:
+            me = ENV_SECRET.match(line.strip())
+            if me and len(me.group(3)) < 200:
+                k = (me.group(1), me.group(3))
+                if k not in seen:
+                    seen.add(k)
+                    out.append(Secret("Runtime", "", f"{me.group(1)}={me.group(3)}",
+                                      Status.CLEARTEXT, target=f"pid {pid} ({comm})",
+                                      secret_type="proc-env",
+                                      notes="secret in process environment"))
+    return out
