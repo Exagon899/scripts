@@ -83,7 +83,7 @@ class SamLsaCollector(BaseCollector):
                                         "(plaintext in raw output)", Status.CLEARTEXT,
                                         secret_type="password",
                                         notes="LSA secret plaintext - see raw file"))
-                elif re.match(r"^\S+/\S+:.+", line) and "$" not in line.split(":")[0]:
+                elif re.match(r"^\S+[\\/]\S+:.+", line) and "$" not in line.split(":")[0]:
                     name, val = line.split(":", 1)
                     if val and len(val) < 200:
                         found.append(Secret(self.host, "LSA", name, val,
