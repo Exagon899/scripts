@@ -329,7 +329,9 @@ def parse_raw_request(path, scheme):
         if not host:
             raise ValueError("no Host header and path is not absolute")
         url = f"{scheme}://{host}{path_q}"
-    body = body if body.strip() else None
+    # strip only the file's trailing CR/LF (editor artifact) from the body;
+    # trailing spaces/tabs and internal newlines are preserved.
+    body = body.rstrip("\r\n") if body.strip() else None
     return method, url, headers, body
 
 
