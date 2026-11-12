@@ -236,12 +236,14 @@ for h in $HOMES; do
     cp_dir "$h/.kde/share/apps/kwallet"
     cp_dir "$h/.local/share/kwalletd"
     cp_dir "$h/.password-store"
-    for b in .mozilla/firefox .thunderbird; do
+     for b in .mozilla/firefox .thunderbird \
+             .var/app/org.mozilla.firefox/.mozilla/firefox; do
         [ -d "$h/$b" ] || continue
-        for f in logins.json key4.db key3.db signons.sqlite; do
-            find "$h/$b" -xdev -maxdepth 2 -name "$f" 2>/dev/null | \
-                while IFS= read -r ff; do cp_one "$ff"; done
-        done
+        # only the .default-release / .default profile dirs, not the whole tree
+        find "$h/$b" -maxdepth 1 -type d \( -name "*.default*" -o -name "*.default-release*" \) 2>/dev/null | \
+            while IFS= read -r prof; do
+                cp_dir "$prof"
+            done
     done
     for b in .config/google-chrome .config/chromium \
              ".config/BraveSoftware/Brave-Browser" .config/microsoft-edge \
