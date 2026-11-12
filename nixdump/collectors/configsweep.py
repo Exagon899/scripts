@@ -30,9 +30,10 @@ CRED_LINE = re.compile(
 # Key name must mean "real secret" — standalone password/secret names, or
 # prefixed forms (db_password, smtp_pass, aws_secret, ...). Drops "bypass"
 # and other accidental matches.
+# in collectors/configsweep.py, replace the SECRET_KEY regex with:
 SECRET_KEY = re.compile(
     r"^(?:"
-    r"password|passwd|passphrase|pwd|secret|token|"
+    r"password|passwd|passphrase|pass|pwd|secret|token|"
     r"api[_-]?key|apikey|access[_-]?key|private[_-]?key|credential|bindpw|"
     r"(?:db|mysql|postgres|pg|redis|mongo|amqp|smtp|mail|ldap|admin|"
     r"root|user|service|api|app|auth|account|sso|aws|azure|gcp|gcs|s3|"
