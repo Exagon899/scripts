@@ -1,7 +1,5 @@
-"""Runtime secrets: environment of running processes (/proc/*/environ - root),
-process command lines with inline passwords, and Kerberos ticket caches/keytabs.
-These catch creds that never touch a config file - injected into services at
-start, or passed on a command line right now."""
+"""Runtime secrets: env of running processes (/proc/*/environ), cmdline
+secrets, and Kerberos ticket caches/keytabs."""
 from __future__ import annotations
 
 import os
@@ -9,19 +7,17 @@ import re
 from typing import List
 
 from core.secret import Secret, Status
-from core.tools import read_bytes, read_text, is_root, find_files, env_pair_is_junk
+from core.tools import (read_bytes, read_text, is_root, find_files,
+                        env_pair_is_junk, realpath)
 from .base import BaseCollector
 
 ENV_SECRET = re.compile(
     r"^([A-Z0-9_]*(PASS|PWD|SECRET|TOKEN|APIKEY|API_KEY|KEY|DSN|CONN|AUTH)[A-Z0-9_]*)=(.+)$",
     re.I)
-# explicit inline-secret patterns (always a credential, never a port/path/flag)
 CMD_SECRET = re.compile(
     r"(--password[= ]\S+|sshpass\s+-p\s*\S+|PGPASSWORD=\S+|MYSQL_PWD=\S+|"
     r"redis-cli\b[^\n]*\s-a\s*\S+|\btoken=\S+|\bsecret=\S+|"
     r"\bapi[_-]?key=\S+|\baccess[_-]?key=\S+)", re.I)
-# short -pVALUE (no space) only next to a client that uses -p for the PASSWORD
-# (mysql/mariadb/mongo). psql/redis use -p for the PORT, so they are excluded.
 CMD_DB_P = re.compile(
     r"\b(mysql|mysqldump|mariadb|mongo|mongosh)\b[^\n]*\s-p\S+", re.I)
 
@@ -36,13 +32,12 @@ class RuntimeCollector(BaseCollector):
 
     def collect(self) -> List[Secret]:
         found: List[Secret] = []
-        # /proc is not in the bundle; parse the shell collector's meta capture
         found += self._proc_offline()
         found += self._kerberos()
+        found += self._kerberos_parsed()
         return found
 
     def _proc_offline(self) -> List[Secret]:
-        """Parse meta/proc.txt captured on the target by nixdump.sh."""
         if not self.meta_dir:
             return []
         try:
@@ -61,7 +56,6 @@ class RuntimeCollector(BaseCollector):
         except OSError:
             return out
         for pid in pids:
-            # environ (root can read other users' - that's the valuable part)
             env = read_bytes(f"/proc/{pid}/environ", max_bytes=64 * 1024)
             comm = (read_text(f"/proc/{pid}/comm") or "").strip()
             if env:
@@ -80,7 +74,6 @@ class RuntimeCollector(BaseCollector):
                                           Status.CLEARTEXT, target=f"pid {pid} ({comm})",
                                           secret_type="proc-env",
                                           notes="secret in process environment"))
-            # cmdline
             cl = read_bytes(f"/proc/{pid}/cmdline", max_bytes=16 * 1024)
             if cl:
                 cmd = cl.replace(b"\x00", b" ").decode("utf-8", "ignore").strip()
@@ -95,7 +88,6 @@ class RuntimeCollector(BaseCollector):
 
     def _kerberos(self) -> List[Secret]:
         out = []
-        # ccaches in /tmp and keytabs across the fs
         for f in find_files(["/tmp", "/var/tmp", "/run"],
                             re.compile(r"^krb5cc_.*"), max_depth=2):
             out.append(Secret("Runtime", "", f, Status.INFO, target=f,
@@ -108,18 +100,38 @@ class RuntimeCollector(BaseCollector):
                               notes="Kerberos keytab; klist -k / impacket w/ keytab"))
         return out
 
+    def _kerberos_parsed(self) -> List[Secret]:
+        out = []
+        try:
+            from impacket.krb5.ccache import CCache
+        except Exception:
+            return out
+        for f in find_files(["/tmp", "/var/tmp", "/run"],
+                            re.compile(r"^krb5cc_.*"), max_depth=2):
+            try:
+                cc = CCache.loadFile(realpath(f))
+                if not cc:
+                    continue
+                try:
+                    principal = cc.getCredential()
+                except Exception:
+                    principal = None
+                out.append(Secret("Runtime",
+                                  str(principal) if principal else "",
+                                  f, Status.INFO, target=f,
+                                  secret_type="ccache-parsed",
+                                  notes="Kerberos ticket cache (parsed by impacket)"))
+            except Exception as e:
+                out.append(Secret("Runtime", "", f, Status.INFO, target=f,
+                                  secret_type="ccache",
+                                  notes="ccache (parse failed: %s)" % e))
+        return out
+
 
 HEADER_RE = re.compile(r"^=== PID (\d+) \((.*)\) ===$")
 
 
 def parse_proc_capture(text: str) -> List[Secret]:
-    """Parse the meta/proc.txt format written by nixdump.sh:
-        === PID <pid> (<comm>) ===
-        CMDLINE: <cmd>
-        ENVIRON:
-        KEY=val
-        ...
-    Apply the same secret regexes used for live /proc."""
     out: List[Secret] = []
     seen = set()
     pid = comm = ""
