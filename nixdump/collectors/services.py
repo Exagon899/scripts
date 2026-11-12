@@ -291,7 +291,21 @@ class ServicesCollector(BaseCollector):
         out = []
         roots = ["/var/www", "/srv", "/opt", "/home", "/root", "/tmp", "/var/backups"]
         rx = re.compile(r".*\.(sql|bak|dump|db|sqlite3?)$", re.I)
+        # Skip files that belong to an application profile already parsed by a
+        # dedicated collector (Firefox/Thunderbird/Chromium). Those profile DBs
+        # are not credential sources on their own; only logins.json / key4.db
+        # matter and are handled by AppsCollector.
+        SKIP = re.compile(
+            r"(?:/\.mozilla/(?:firefox|thunderbird)/|"
+            r"/\.config/(?:google-chrome|chromium|BraveSoftware|microsoft-edge|"
+            r"vivaldi|opera)/|"
+            r"/\.thunderbird/|"
+            r"/\.var/app/org\.mozilla\.firefox/|"
+            r"/\.var/app/com\.google\.Chrome/|"
+            r"/\.var/app/com\.brave\.Browser/)", re.I)
         for f in find_files(roots, rx, max_depth=4, max_hits=400):
+            if SKIP.search(f):
+                continue
             try:
                 sz = os.path.getsize(f)
             except Exception:
